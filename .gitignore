@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# 数据库和日志（包含敏感信息）
+*.db
+*.sqlite
+*.sqlite3
+logs/
+logs.txt
+
+# 环境
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# 渲染输出（临时文件）
+*.png
+*.jpg
+output/
+temp/
+
+# 测试数据
+test_data/
+
+# AstrBot 特定
+AstrBot/data/plugins/astrbot_plugin_sklands/

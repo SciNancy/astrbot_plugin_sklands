@@ -1,0 +1,5 @@
+name: astrbot_plugin_sklands
+desc: "通过森空岛查询游戏数据（明日方舟、终末地），支持角色卡片、签到、抽卡记录等功能"
+version: "v0.1.0"
+author: "FrostN0v0"
+repo: "https://github.com/FrostN0v0/nonebot-plugin-skland"
