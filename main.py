@@ -98,9 +98,45 @@ class SklandPlugin(Star):
             "请使用【森空岛APP】扫描下方二维码完成绑定\n"
             "二维码有效期约2分钟"
         )
-        yield event.image_result(str(qr_path))
 
-        self._qrcode_tasks[scan_id] = {"umo": umo, "sender_id": sender_id}
+        # 尝试获取 QQ 平台的 message_id 以便扫码成功后自动撤回
+        qrcode_msg_id = None
+        try:
+            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
+            if isinstance(event, AiocqhttpMessageEvent):
+                import base64
+                with open(qr_path, "rb") as f:
+                    img_b64 = base64.b64encode(f.read()).decode()
+                client = event.bot
+                # 尝试用 OneBot API 发送图片并获取 message_id
+                if event.get_group_id():
+                    resp = await client.call_action(
+                        "send_group_msg",
+                        group_id=int(event.get_group_id()),
+                        message=f"[CQ:image,file=base64://{img_b64}]"
+                    )
+                else:
+                    resp = await client.call_action(
+                        "send_private_msg",
+                        user_id=int(event.get_sender_id()),
+                        message=f"[CQ:image,file=base64://{img_b64}]"
+                    )
+                # 解析返回的 message_id
+                if isinstance(resp, dict):
+                    qrcode_msg_id = resp.get("data", {}).get("message_id") or resp.get("message_id")
+                logger.debug(f"[Skland] 二维码消息 ID: {qrcode_msg_id}")
+            else:
+                yield event.image_result(str(qr_path))
+        except Exception as e:
+            logger.warning(f"[Skland] 尝试获取二维码消息 ID 失败，将不会自动撤回: {e}")
+            yield event.image_result(str(qr_path))
+
+        self._qrcode_tasks[scan_id] = {
+            "umo": umo,
+            "sender_id": sender_id,
+            "qrcode_msg_id": qrcode_msg_id,
+            "event": event if 'AiocqhttpMessageEvent' in str(type(event)) else None,
+        }
         asyncio.create_task(self._poll_scan_status(scan_id))
 
     async def _poll_scan_status(self, scan_id: str):
@@ -197,6 +233,18 @@ class SklandPlugin(Star):
                 chain = MessageChain()
                 chain.chain = [Comp.Plain(msg)]
                 await self.context.send_message(umo, chain)
+
+                # 自动撤回二维码消息（QQ 平台）
+                qrcode_msg_id = task_info.get("qrcode_msg_id")
+                event_obj = task_info.get("event")
+                if qrcode_msg_id and event_obj:
+                    try:
+                        client = event_obj.bot
+                        await client.call_action("delete_msg", message_id=int(qrcode_msg_id))
+                        logger.debug(f"[Skland] 已自动撤回二维码消息: {qrcode_msg_id}")
+                    except Exception as e:
+                        logger.warning(f"[Skland] 自动撤回二维码消息失败: {e}")
+
                 break
 
             except Exception as e:
@@ -456,14 +504,14 @@ class SklandPlugin(Star):
             train_str = "空闲中"
 
         lines = [
-            f"═ {s.name} ════════════════════════",
+            f"═ {s.name}",
             f"  理智:    {ap_str}",
             f"  公招:    {recruit_str}",
             f"  剿灭:    {jm_str}",
             f"  每日:    {daily.current} / {daily.total}",
             f"  每周:    {weekly.current} / {weekly.total}",
             f"  训练室:  {train_str}",
-            "═════════════════════════════════════",
+            "════════════",
         ]
         return lines
 
@@ -534,7 +582,7 @@ class SklandPlugin(Star):
                     domain_lines.append(f"  {name}:  数据异常")
 
         lines = [
-            f"═ {base.name} ════════════════════════",
+            f"═ {base.name}",
             f"  理智:      {ap_str}",
             f"  每日任务:  {daily_str}",
             f"  每周任务:  {weekly_str}",
@@ -542,7 +590,7 @@ class SklandPlugin(Star):
         if domain_lines:
             lines.append("  据点票券:")
             lines.extend(domain_lines)
-        lines.append("═════════════════════════════════════")
+        lines.append("════════════")
         return lines
 
     @sk.command("mr")
@@ -596,7 +644,7 @@ class SklandPlugin(Star):
                 final_lines.append("【终末地】未绑定角色")
                 final_lines.append("")
 
-            final_lines.append("═════════════════════════════════════")
+            final_lines.append("════════════")
             yield event.plain_result("\n".join(final_lines))
 
     # ==================== 工具方法 ====================
