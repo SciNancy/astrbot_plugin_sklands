@@ -1,11 +1,9 @@
-"""渲染适配层：将原插件的 Jinja2 模板渲染桥接到 AstrBot 的 html_render
+"""渲染适配层：将原插件的 Jinja2 模板渲染为图片
 
-原插件使用 nonebot-plugin-htmlrender 的 template_to_pic，
-AstrBot 原生提供 html_render（基于 Playwright）。
+原插件使用 nonebot-plugin-htmlrender 的 template_to_pic（基于 Playwright）。
+AstrBot 也可能提供 html_render（基于 Playwright）。
 
-关键差异：
-- 原插件支持设置 viewport，AstrBot 的 html_render 只透传 screenshot 参数
-- 因此改用 CSS 强制页面宽度，让 Playwright 的 full_page 截图自动适配内容高度
+本模块优先使用 AstrBot 的 html_render，如果不可用则使用内置 Playwright fallback。
 """
 
 import jinja2
@@ -50,7 +48,7 @@ _jinja_env.filters["format_money_wan"] = format_money_wan
 
 
 def _make_width_clamp_style(width: int = 706) -> str:
-    """生成强制页面宽度的注入样式（解决 AstrBot html_render 无法设置 viewport 的问题）"""
+    """生成强制页面宽度的注入样式（解决 viewport 无法设置的问题）"""
     return f"""
 <style id="astrbot-render-fix">
   html, body {{
@@ -65,8 +63,58 @@ def _make_width_clamp_style(width: int = 706) -> str:
 """
 
 
+async def _html_to_pic(
+    html_content: str,
+    width: int = 706,
+    height: int = 1160,
+    full_page: bool = True,
+) -> str:
+    """使用 Playwright 将 HTML 渲染为图片，返回图片路径。
+
+    作为 AstrBot html_render 的 fallback，当 star.html_render 不可用时调用。
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        raise RuntimeError(
+            "Playwright 未安装，无法渲染卡片。"
+            "请运行: pip install playwright && playwright install chromium"
+        )
+
+    output_path = Path(__file__).parent / "data" / "cache"
+    output_path.mkdir(parents=True, exist_ok=True)
+    file_name = output_path / f"skland_card_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page(viewport={"width": width, "height": height})
+        await page.set_content(
+            html_content,
+            wait_until="networkidle",
+        )
+        await page.screenshot(
+            path=str(file_name),
+            full_page=full_page,
+        )
+        await browser.close()
+
+    return str(file_name)
+
+
+async def _try_star_html_render(star, html_content: str) -> str:
+    """优先尝试 AstrBot 的 html_render，失败则使用内置 Playwright fallback"""
+    # 检查 star 是否有 html_render 方法
+    if hasattr(star, "html_render"):
+        try:
+            wrapper = "{{ html | safe }}"
+            return await star.html_render(wrapper, {"html": html_content})
+        except Exception:
+            pass  # fallback 到内置渲染
+    return await _html_to_pic(html_content)
+
+
 async def render_ark_card(star, card_data: ArkCard, bg_path: str) -> str:
-    """渲染明日方舟角色卡片为图片 URL"""
+    """渲染明日方舟角色卡片为图片路径"""
     template = _jinja_env.get_template("ark_card.html.jinja2")
 
     rendered_html = await template.render_async(
@@ -93,13 +141,17 @@ async def render_ark_card(star, card_data: ArkCard, bg_path: str) -> str:
     else:
         rendered_html = width_clamp + rendered_html
 
-    wrapper = "{{ html | safe }}"
-    url = await star.html_render(wrapper, {"html": rendered_html})
-    return url
+    return await _try_star_html_render(star, rendered_html)
 
 
-async def render_ef_card(star, card_data: EndfieldCard, bg_path: str, show_all: bool = False, is_simple: bool = False) -> str:
-    """渲染终末地角色卡片为图片 URL"""
+async def render_ef_card(
+    star,
+    card_data: EndfieldCard,
+    bg_path: str,
+    show_all: bool = False,
+    is_simple: bool = False,
+) -> str:
+    """渲染终末地角色卡片为图片路径"""
     if show_all:
         filtered_chars = card_data.chars
     else:
@@ -164,6 +216,4 @@ async def render_ef_card(star, card_data: EndfieldCard, bg_path: str, show_all: 
     else:
         rendered_html = width_clamp + rendered_html
 
-    wrapper = "{{ html | safe }}"
-    url = await star.html_render(wrapper, {"html": rendered_html})
-    return url
+    return await _try_star_html_render(star, rendered_html)

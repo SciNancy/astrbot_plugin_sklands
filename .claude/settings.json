@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import py_compile; py_compile.compile\\('main.py', doraise=True\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('render_adapter.py', doraise=True\\)\")",
+      "Bash(python -c \"import py_compile; py_compile.compile\\('filters.py', doraise=True\\)\")",
+      "Read(//e/AstrBot/**)",
+      "Bash(python -c \"import astrbot; print\\(astrbot.__file__\\)\")",
+      "Bash(python -c \"import astrbot.api.star; import inspect; print\\(inspect.getfile\\(astrbot.api.star\\)\\)\")"
+    ]
+  }
+}

@@ -33,3 +33,6 @@ test_data/
 
 # AstrBot 特定
 AstrBot/data/plugins/astrbot_plugin_sklands/
+
+# 原始参考源码（已移植所需文件）
+nonebot-plugin-skland-master/

@@ -27,8 +27,7 @@ from .db import (
 )
 from .api import SklandAPI, SklandLoginAPI
 from .schemas import CRED
-# Card 渲染功能（暂未发布）
-# from .render_adapter import render_ark_card, render_ef_card
+from .render_adapter import render_ark_card, render_ef_card
 from .utils import call_api_with_refresh
 
 
@@ -59,10 +58,15 @@ class SklandPlugin(Star):
         if isinstance(e, (LoginException, UnauthorizedException)):
             if "Token 已失效" in msg:
                 return msg  # 已经包含提示
-            return f"Token 已失效，请使用 /sk login 重新扫码绑定。\n原始错误: {msg}"
+            return f"Token 已失效, 请使用 /sk login 重新扫码绑定.\n原始错误: {msg}"
         elif isinstance(e, Exception):
             return f"请求失败: {msg}"
         return f"未知错误: {msg}"
+
+    @staticmethod
+    def _sk(text: str) -> str:
+        """统一添加插件前缀，便于外部插件识别来源"""
+        return f"[Sklands]\n{text}"
 
     # ==================== 指令组 ====================
 
@@ -82,7 +86,7 @@ class SklandPlugin(Star):
         try:
             scan_id = await SklandLoginAPI.get_scan()
         except Exception as e:
-            yield event.plain_result(f"❌ 获取二维码失败: {e}")
+            yield event.plain_result(self._sk(f"❌ 获取二维码失败: {e}"))
             return
 
         try:
@@ -91,12 +95,14 @@ class SklandPlugin(Star):
             qr_path = self.data_dir / f"qrcode_{sender_id}.png"
             qr_img.save(str(qr_path))
         except Exception as e:
-            yield event.plain_result(f"❌ 生成二维码失败: {e}")
+            yield event.plain_result(self._sk(f"❌ 生成二维码失败: {e}"))
             return
 
         yield event.plain_result(
-            "请使用【森空岛APP】扫描下方二维码完成绑定\n"
-            "二维码有效期约2分钟"
+            self._sk(
+                "请使用[森空岛APP]扫描下方二维码完成绑定\n"
+                "二维码有效期约2分钟"
+            )
         )
 
         # 尝试获取 QQ 平台的 message_id 以便扫码成功后自动撤回
@@ -128,7 +134,7 @@ class SklandPlugin(Star):
             else:
                 yield event.image_result(str(qr_path))
         except Exception as e:
-            logger.warning(f"[Skland] 尝试获取二维码消息 ID 失败，将不会自动撤回: {e}")
+            logger.warning(f"[Skland] 尝试获取二维码消息 ID 失败, 将不会自动撤回: {e}")
             yield event.image_result(str(qr_path))
 
         self._qrcode_tasks[scan_id] = {
@@ -224,11 +230,11 @@ class SklandPlugin(Star):
                     has_chars = bool(ark_chars or ef_chars)
 
                 if has_chars:
-                    msg = "✅ 扫码绑定成功！"
+                    msg = self._sk("✅ 扫码绑定成功!")
                 else:
-                    msg = (
-                        "✅ 扫码绑定成功！\n"
-                        "⚠️ 但自动同步角色列表失败，请手动执行 /sk sync 同步游戏角色"
+                    msg = self._sk(
+                        "✅ 扫码绑定成功!\n"
+                        "⚠️ 但自动同步角色列表失败, 请手动执行 /sk sync 同步游戏角色"
                     )
                 chain = MessageChain()
                 chain.chain = [Comp.Plain(msg)]
@@ -252,7 +258,7 @@ class SklandPlugin(Star):
                 continue
         else:
             chain = MessageChain()
-            chain.chain = [Comp.Plain("❌ 二维码已过期，请重新发送 /sk login")]
+            chain.chain = [Comp.Plain(self._sk("❌ 二维码已过期, 请重新发送 /sk login"))]
             await self.context.send_message(umo, chain)
         
         self._qrcode_tasks.pop(scan_id, None)
@@ -281,7 +287,7 @@ class SklandPlugin(Star):
 
             await self._sync_binding_chars(session, user, CRED(cred=cred, token=cred_token))
             await session.commit()
-            yield event.plain_result("绑定成功！")
+            yield event.plain_result(self._sk("绑定成功!"))
 
     @sk.command("unbind")
     async def cmd_unbind(self, event: AstrMessageEvent):
@@ -290,11 +296,11 @@ class SklandPlugin(Star):
         async with await get_session() as session:
             user = await get_user_by_platform(session, sender_id)
             if not user:
-                yield event.plain_result("你还没有绑定账号。")
+                yield event.plain_result(self._sk("你还没有绑定账号."))
                 return
             await session.delete(user)
             await session.commit()
-            yield event.plain_result("已解绑。")
+            yield event.plain_result(self._sk("已解绑."))
 
     @sk.command("sync")
     async def cmd_sync(self, event: AstrMessageEvent):
@@ -303,7 +309,7 @@ class SklandPlugin(Star):
         async with await get_session() as session:
             user = await get_user_by_platform(session, sender_id)
             if not user:
-                yield event.plain_result("未绑定森空岛账号。")
+                yield event.plain_result(self._sk("未绑定森空岛账号."))
                 return
             cred = CRED(cred=user.cred, token=user.cred_token)
             try:
@@ -311,16 +317,16 @@ class SklandPlugin(Star):
                 await session.commit()
                 ark_chars = await get_ark_characters(session, user)
                 ef_chars = await get_ef_characters(session, user)
-                parts = ["✅ 角色列表同步成功！"]
+                parts = ["✅ 角色列表同步成功!"]
                 if ark_chars:
-                    parts.append(f"明日方舟: {len(ark_chars)}个")
+                    parts.append(f"[Arknights]: {len(ark_chars)}个")
                 if ef_chars:
-                    parts.append(f"终末地: {len(ef_chars)}个")
+                    parts.append(f"[EndField]: {len(ef_chars)}个")
                 if not ark_chars and not ef_chars:
                     parts.append("未找到任何角色")
-                yield event.plain_result("\n".join(parts))
+                yield event.plain_result(self._sk("\n".join(parts)))
             except Exception as e:
-                yield event.plain_result(f"同步失败：{e}")
+                yield event.plain_result(self._sk(f"同步失败: {e}"))
 
     async def _sync_binding_chars(self, session, user: SkUser, cred_data: CRED):
         binding_list = await SklandAPI.get_binding(cred_data)
@@ -353,19 +359,16 @@ class SklandPlugin(Star):
 
     # ==================== 签到 ====================
 
-    @sk.command("arksign")
-    async def cmd_arksign(self, event: AstrMessageEvent):
-        """明日方舟签到  用法: /sk arksign"""
+    async def _do_ark_sign(self, event: AstrMessageEvent) -> list[str] | None:
+        """执行明日方舟签到；None 表示未绑定账号, [] 表示已绑定但无角色"""
         sender_id = event.get_sender_id()
         async with await get_session() as session:
             user = await get_user_by_platform(session, sender_id)
             if not user:
-                yield event.plain_result("未绑定森空岛账号。")
-                return
+                return None
             chars = await get_ark_characters(session, user)
             if not chars:
-                yield event.plain_result("未找到绑定的明日方舟角色。")
-                return
+                return []
 
             results = []
             for char in chars:
@@ -377,7 +380,7 @@ class SklandPlugin(Star):
                     awards_text = "\n".join(
                         f"  {award.resource.name} x {award.count}" for award in result.awards
                     )
-                    results.append(f"✅ {char.nickname} 签到成功，获得了:\n📦{awards_text}")
+                    results.append(f"✅ {char.nickname} 签到成功, 获得:\n📦{awards_text}")
                 except Exception as e:
                     error_msg = self._format_error(e)
                     if "请勿重复签到" in error_msg or "已签到" in error_msg:
@@ -385,21 +388,18 @@ class SklandPlugin(Star):
                     else:
                         results.append(f"❌ {char.nickname} 签到失败: {error_msg}")
                 await session.commit()
-            yield event.plain_result("\n\n".join(results))
+            return results
 
-    @sk.command("efsign")
-    async def cmd_efsign(self, event: AstrMessageEvent):
-        """终末地签到  用法: /sk efsign"""
+    async def _do_ef_sign(self, event: AstrMessageEvent) -> list[str] | None:
+        """执行终末地签到；None 表示未绑定账号, [] 表示已绑定但无角色"""
         sender_id = event.get_sender_id()
         async with await get_session() as session:
             user = await get_user_by_platform(session, sender_id)
             if not user:
-                yield event.plain_result("未绑定森空岛账号。")
-                return
+                return None
             chars = await get_ef_characters(session, user)
             if not chars:
-                yield event.plain_result("未找到绑定的终末地角色。")
-                return
+                return []
 
             results = []
             for char in chars:
@@ -421,7 +421,7 @@ class SklandPlugin(Star):
                             count = 0
                         award_lines.append(f"  {name} x{count}")
                     awards_text = "\n".join(award_lines) if award_lines else "  (无奖励信息)"
-                    results.append(f"✅ {char.nickname} 签到成功，获得了:\n📦{awards_text}")
+                    results.append(f"✅ {char.nickname} 签到成功, 获得:\n📦{awards_text}")
                 except Exception as e:
                     error_msg = self._format_error(e)
                     if "请勿重复签到" in error_msg or "已签到" in error_msg:
@@ -429,7 +429,60 @@ class SklandPlugin(Star):
                     else:
                         results.append(f"❌ {char.nickname} 签到失败: {error_msg}")
                 await session.commit()
-            yield event.plain_result("\n\n".join(results))
+            return results
+
+    @sk.command("arksign")
+    async def cmd_arksign(self, event: AstrMessageEvent):
+        """明日方舟签到  用法: /sk arksign"""
+        results = await self._do_ark_sign(event)
+        if results is None:
+            yield event.plain_result(self._sk("未绑定森空岛账号."))
+            return
+        if not results:
+            yield event.plain_result(self._sk("未找到绑定的[Arknights]角色."))
+            return
+        yield event.plain_result(self._sk("\n\n".join(results)))
+
+    @sk.command("efsign")
+    async def cmd_efsign(self, event: AstrMessageEvent):
+        """终末地签到  用法: /sk efsign"""
+        results = await self._do_ef_sign(event)
+        if results is None:
+            yield event.plain_result(self._sk("未绑定森空岛账号."))
+            return
+        if not results:
+            yield event.plain_result(self._sk("未找到绑定的[EndField]角色."))
+            return
+        yield event.plain_result(self._sk("\n\n".join(results)))
+
+    @sk.command("sign")
+    async def cmd_sign(self, event: AstrMessageEvent):
+        """一键签到所有游戏  用法: /sk sign"""
+        all_results: list[str] = []
+
+        ark_results = await self._do_ark_sign(event)
+        if ark_results is None:
+            yield event.plain_result(self._sk("未绑定森空岛账号."))
+            return
+        if ark_results:
+            all_results.append("[Arknights]")
+            all_results.extend(ark_results)
+
+        ef_results = await self._do_ef_sign(event)
+        if ef_results is None:
+            yield event.plain_result(self._sk("未绑定森空岛账号."))
+            return
+        if ef_results:
+            if all_results:
+                all_results.append("")
+            all_results.append("[EndField]")
+            all_results.extend(ef_results)
+
+        if not all_results:
+            yield event.plain_result(self._sk("未找到任何可签到的角色."))
+            return
+
+        yield event.plain_result(self._sk("\n\n".join(all_results)))
 
     # ==================== 纯文本看板 ====================
 
@@ -440,11 +493,11 @@ class SklandPlugin(Star):
         async with await get_session() as session:
             user = await get_user_by_platform(session, sender_id)
             if not user:
-                yield event.plain_result("未绑定森空岛账号。")
+                yield event.plain_result(self._sk("未绑定森空岛账号."))
                 return
             char = await get_default_ark_character(session, user)
             if not char:
-                yield event.plain_result("未找到绑定的明日方舟角色。")
+                yield event.plain_result(self._sk("未找到绑定的[Arknights]角色."))
                 return
 
             cred = CRED(cred=user.cred, token=user.cred_token)
@@ -454,11 +507,11 @@ class SklandPlugin(Star):
                 )
                 await session.commit()
             except Exception as e:
-                yield event.plain_result(self._format_error(e))
+                yield event.plain_result(self._sk(self._format_error(e)))
                 return
 
             lines = self._format_arkmr(card_data)
-            yield event.plain_result("\n".join(lines))
+            yield event.plain_result(self._sk("\n".join(lines)))
 
     def _format_arkmr(self, card) -> list[str]:
         """格式化明日方舟看板"""
@@ -472,7 +525,7 @@ class SklandPlugin(Star):
             ap_str = f"{ap_now} / {ap.max}  (已满)"
         else:
             recover_secs = max(0, ap.completeRecoveryTime - now_ts)
-            ap_str = f"{ap_now} / {ap.max}  ({self._fmt_time(recover_secs)}后全满)"
+            ap_str = f"{ap_now} / {ap.max}  ({self._fmt_time(recover_secs)})"
 
         # 公招
         finished = card.recruit_finished
@@ -511,7 +564,6 @@ class SklandPlugin(Star):
             f"  每日:    {daily.current} / {daily.total}",
             f"  每周:    {weekly.current} / {weekly.total}",
             f"  训练室:  {train_str}",
-            "════════════",
         ]
         return lines
 
@@ -522,11 +574,11 @@ class SklandPlugin(Star):
         async with await get_session() as session:
             user = await get_user_by_platform(session, sender_id)
             if not user:
-                yield event.plain_result("未绑定森空岛账号。")
+                yield event.plain_result(self._sk("未绑定森空岛账号."))
                 return
             char = await get_default_ef_character(session, user)
             if not char:
-                yield event.plain_result("未找到绑定的终末地角色。")
+                yield event.plain_result(self._sk("未找到绑定的[EndField]角色."))
                 return
 
             cred = CRED(cred=user.cred, token=user.cred_token)
@@ -537,11 +589,11 @@ class SklandPlugin(Star):
                 )
                 await session.commit()
             except Exception as e:
-                yield event.plain_result(self._format_error(e))
+                yield event.plain_result(self._sk(self._format_error(e)))
                 return
 
             lines = self._format_efmr(card_data)
-            yield event.plain_result("\n".join(lines))
+            yield event.plain_result(self._sk("\n".join(lines)))
 
     def _format_efmr(self, card) -> list[str]:
         """格式化终末地看板"""
@@ -560,7 +612,7 @@ class SklandPlugin(Star):
             if remain_secs <= 0:
                 ap_str = f"{cur_ap} / {max_ap}  (已满)"
             else:
-                ap_str = f"{cur_ap} / {max_ap}  ({self._fmt_time(remain_secs)}后全满)"
+                ap_str = f"{cur_ap} / {max_ap}  ({self._fmt_time(remain_secs)})"
         except Exception:
             ap_str = "未知"
 
@@ -590,7 +642,6 @@ class SklandPlugin(Star):
         if domain_lines:
             lines.append("  据点票券:")
             lines.extend(domain_lines)
-        lines.append("════════════")
         return lines
 
     @sk.command("mr")
@@ -600,10 +651,10 @@ class SklandPlugin(Star):
         async with await get_session() as session:
             user = await get_user_by_platform(session, sender_id)
             if not user:
-                yield event.plain_result("未绑定森空岛账号。")
+                yield event.plain_result(self._sk("未绑定森空岛账号."))
                 return
 
-            final_lines = ["═ 森空岛综合看板 ════════════════════════", ""]
+            final_lines = ["══^森空岛综合看板^══", ""]
 
             # 方舟
             ark_char = await get_default_ark_character(session, user)
@@ -613,15 +664,15 @@ class SklandPlugin(Star):
                     ark_card = await call_api_with_refresh(
                         user, SklandAPI.ark_card, cred, str(ark_char.uid)
                     )
-                    final_lines.append("【明日方舟】")
+                    final_lines.append("[Arknights]")
                     final_lines.extend(self._format_arkmr(ark_card))
                     final_lines.append("")
                 except Exception as e:
-                    final_lines.append(f"【明日方舟】{self._format_error(e)}")
+                    final_lines.append(f"[Arknights]{self._format_error(e)}")
                     final_lines.append("")
                 await session.commit()
             else:
-                final_lines.append("【明日方舟】未绑定角色")
+                final_lines.append("[Arknights]未绑定角色")
                 final_lines.append("")
 
             # 终末地
@@ -633,29 +684,109 @@ class SklandPlugin(Star):
                     ef_card = await call_api_with_refresh(
                         user, SklandAPI.endfield_card, cred, skland_uid, ef_char
                     )
-                    final_lines.append("【终末地】")
+                    final_lines.append("[EndField]")
                     final_lines.extend(self._format_efmr(ef_card))
                     final_lines.append("")
                 except Exception as e:
-                    final_lines.append(f"【终末地】{self._format_error(e)}")
+                    final_lines.append(f"[EndField]{self._format_error(e)}")
                     final_lines.append("")
                 await session.commit()
             else:
-                final_lines.append("【终末地】未绑定角色")
+                final_lines.append("[EndField]未绑定角色")
                 final_lines.append("")
+            yield event.plain_result(self._sk("\n".join(final_lines)))
 
-            final_lines.append("════════════")
-            yield event.plain_result("\n".join(final_lines))
+    # ==================== 卡片渲染 ====================
+
+    def _get_bg_path(self, game: str) -> str:
+        """获取卡片背景图片路径；game 为 'ark' 或 'endfield'"""
+        base = self.data_dir.parent / "resources" / "images" / "background"
+        if game == "endfield":
+            path = base / "endfield" / "default_bg.jpg"
+        else:
+            path = base / "bg.jpg"
+        if path.exists():
+            return str(path)
+        # fallback: 使用插件包内资源
+        from .config import RES_DIR
+        if game == "endfield":
+            return str(RES_DIR / "images" / "background" / "endfield" / "default_bg.jpg")
+        return str(RES_DIR / "images" / "background" / "bg.jpg")
+
+    @sk.command("arkcard")
+    async def cmd_arkcard(self, event: AstrMessageEvent):
+        """明日方舟卡片  用法: /sk arkcard"""
+        sender_id = event.get_sender_id()
+        async with await get_session() as session:
+            user = await get_user_by_platform(session, sender_id)
+            if not user:
+                yield event.plain_result(self._sk("未绑定森空岛账号."))
+                return
+            char = await get_default_ark_character(session, user)
+            if not char:
+                yield event.plain_result(self._sk("未找到绑定的[Arknights]角色."))
+                return
+
+            cred = CRED(cred=user.cred, token=user.cred_token)
+            try:
+                card_data = await call_api_with_refresh(
+                    user, SklandAPI.ark_card, cred, str(char.uid)
+                )
+                await session.commit()
+            except Exception as e:
+                yield event.plain_result(self._sk(self._format_error(e)))
+                return
+
+            try:
+                bg_path = self._get_bg_path("ark")
+                image_url = await render_ark_card(self, card_data, bg_path)
+                yield event.image_result(image_url)
+            except Exception as e:
+                logger.exception(f"[Skland] 渲染方舟卡片失败: {e}")
+                yield event.plain_result(self._sk(f"卡片渲染失败: {e}"))
+
+    @sk.command("efcard")
+    async def cmd_efcard(self, event: AstrMessageEvent):
+        """终末地卡片  用法: /sk efcard"""
+        sender_id = event.get_sender_id()
+        async with await get_session() as session:
+            user = await get_user_by_platform(session, sender_id)
+            if not user:
+                yield event.plain_result(self._sk("未绑定森空岛账号."))
+                return
+            char = await get_default_ef_character(session, user)
+            if not char:
+                yield event.plain_result(self._sk("未找到绑定的[EndField]角色."))
+                return
+
+            cred = CRED(cred=user.cred, token=user.cred_token)
+            try:
+                skland_uid = user.user_id or sender_id
+                card_data = await call_api_with_refresh(
+                    user, SklandAPI.endfield_card, cred, skland_uid, char
+                )
+                await session.commit()
+            except Exception as e:
+                yield event.plain_result(self._sk(self._format_error(e)))
+                return
+
+            try:
+                bg_path = self._get_bg_path("endfield")
+                image_url = await render_ef_card(self, card_data, bg_path)
+                yield event.image_result(image_url)
+            except Exception as e:
+                logger.exception(f"[Skland] 渲染终末地卡片失败: {e}")
+                yield event.plain_result(self._sk(f"卡片渲染失败: {e}"))
 
     # ==================== 工具方法 ====================
 
     @staticmethod
     def _fmt_time(seconds: float) -> str:
-        """格式化秒数为  xh xmin"""
+        """格式化秒数为  xh xm"""
         if seconds <= 0:
-            return "0min"
+            return "0m"
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         if hours > 0:
-            return f"{hours}h {minutes}min"
-        return f"{minutes}min"
+            return f"{hours}h {minutes}m"
+        return f"{minutes}m"
