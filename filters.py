@@ -201,3 +201,61 @@ def format_money_wan(value: str | int | None) -> str:
     if iv >= 10000:
         return f"{iv // 10000}万"
     return str(iv)
+
+
+def format_timestamp_str(stamp_str: str) -> str:
+    """将时间戳字符串格式化为 YYYY-MM-DD HH:MM:SS"""
+    return datetime.fromtimestamp(float(stamp_str)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def format_timestamp_md(ms: int) -> str:
+    """将毫秒或秒时间戳格式化为 MM-DD"""
+    if ms > 1e10:
+        return datetime.fromtimestamp(ms / 1000).strftime("%m-%d")
+    else:
+        return datetime.fromtimestamp(ms).strftime("%m-%d")
+
+
+def charId_to_avatarUrl(charId: str) -> str:
+    """根据角色 ID 获取头像 URL，优先使用本地缓存"""
+    avatar_id = next(
+        (charId.replace(symbol, "_", 1) for symbol in ["@", "#"] if symbol in charId),
+        charId,
+    )
+    img_path = CACHE_DIR / "avatar" / f"{avatar_id}.png"
+    if not img_path.exists():
+        img_url = f"https://web.hycdn.cn/arknights/game/assets/char/avatar/{charId}.png"
+        logger.debug(f"Avatar not found locally, using URL: {img_url}")
+        return img_url
+    return img_path.as_uri()
+
+
+def charId_to_portraitUrl(charId: str) -> str:
+    """根据角色 ID 获取立绘 URL，优先使用本地缓存"""
+    portrait_id = next(
+        (charId.replace(symbol, "_", 1) for symbol in ["@", "#"] if symbol in charId),
+        charId,
+    )
+    img_path = CACHE_DIR / "portrait" / f"{portrait_id}.png"
+    if not img_path.exists():
+        encoded_id = quote(charId, safe="")
+        img_url = f"https://web.hycdn.cn/arknights/game/assets/char/portrait/{encoded_id}.png"
+        logger.debug(f"Portrait not found locally, using URL: {img_url}")
+        return img_url
+    return img_path.as_uri()
+
+
+def ef_charId_to_avatarUrl(item_id: str) -> str:
+    """终末地角色/武器头像 URL 拼接
+
+    角色 ID 以 chr_ 开头，使用 charremoteicon 路径；
+    武器 ID 以 wpn_ 开头，使用 itemiconbig 路径。
+    """
+    if item_id.startswith("wpn_"):
+        return f"https://lulush.microgg.cn/BeyondUID/resource/itemiconbig/{item_id}.png"
+    return f"https://lulush.microgg.cn/BeyondUID/resource/charremoteicon/icon_{item_id}.png"
+
+
+def loads_json(json_str: str) -> dict:
+    """将 JSON 字符串解析为字典"""
+    return json.loads(json_str)

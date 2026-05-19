@@ -26,9 +26,18 @@ from .db import (
     get_ef_characters,
 )
 from .api import SklandAPI, SklandLoginAPI
-from .schemas import CRED
-from .render_adapter import render_ark_card, render_ef_card
+from .schemas import CRED, Topics, RogueData, Clue
+from .render_adapter import (
+    render_ark_card,
+    render_ef_card,
+    render_rogue_card,
+    render_rogue_info,
+    render_clue_board,
+    render_gacha_history,
+    render_ef_gacha_history,
+)
 from .utils import call_api_with_refresh
+from .skland_cos import fetch_cos_images, _download_image
 
 
 class SklandPlugin(Star):
@@ -484,6 +493,56 @@ class SklandPlugin(Star):
 
         yield event.plain_result(self._sk("\n\n".join(all_results)))
 
+    # ==================== COS 图片 ====================
+
+    @sk.command("cos")
+    async def cmd_cos(self, event: AstrMessageEvent, name: str = ""):
+        """森空岛 COS 图片  用法: /sk cos [角色名]
+
+        不带角色名时随机获取一张 cosplay 图片；
+        带角色名时搜索该角色相关的 cosplay 图片。
+        """
+        sender_id = event.get_sender_id()
+        async with await get_session() as session:
+            user = await get_user_by_platform(session, sender_id)
+            if not user:
+                yield event.plain_result(self._sk("未绑定森空岛账号."))
+                return
+
+            try:
+                images = await fetch_cos_images(user.cred, keyword=name)
+                await session.commit()
+            except Exception as e:
+                yield event.plain_result(self._sk(f"获取失败: {e}"))
+                return
+
+            if not images:
+                if name:
+                    yield event.plain_result(
+                        self._sk(f"未找到 '{name}' 相关的 COS 图片，该角色可能没有 COS 投稿。")
+                    )
+                else:
+                    yield event.plain_result(
+                        self._sk("未获取到 COS 图片。\n可能原因：\n1. 森空岛社区 API 暂时不可用\n2. COS 标签数据为空\n3. API 响应结构变更\n请查看 AstrBot 日志获取详细调试信息。")
+                    )
+                return
+
+            # 只取第一张返回
+            entry = images[0]
+            image_url = entry["url"]
+            post_url = entry.get("post_url", "")
+            try:
+                local_path = await _download_image(image_url)
+                yield event.image_result(local_path)
+                if post_url:
+                    yield event.plain_result(self._sk(f"来源: {post_url}"))
+            except Exception as e:
+                logger.warning(f"[Skland] 下载 COS 图片失败: {e}, 尝试直接返回 URL")
+                if post_url:
+                    yield event.plain_result(self._sk(f"图片获取失败，来源: {post_url}"))
+                else:
+                    yield event.plain_result(self._sk(f"图片获取失败: {e}"))
+
     # ==================== 纯文本看板 ====================
 
     @sk.command("arkmr")
@@ -789,6 +848,136 @@ class SklandPlugin(Star):
                 logger.exception(f"[Skland] 渲染终末地卡片失败: {e}")
                 yield event.plain_result(self._sk(f"卡片渲染失败: {e}"))
             event.stop_event()
+
+    # ==================== 肉鸽战绩 ====================
+
+    def _get_rogue_bg_path(self, rogue_id: str = "") -> str:
+        """获取肉鸽背景图片路径"""
+        from .config import RES_DIR
+
+        rogue_bg_map = {
+            "rogue_1": RES_DIR / "images" / "background" / "rogue" / "pic_rogue_1_KV1.png",
+            "rogue_2": RES_DIR / "images" / "background" / "rogue" / "pic_rogue_2_50.png",
+            "rogue_3": RES_DIR / "images" / "background" / "rogue" / "pic_rogue_3_KV2.png",
+            "rogue_4": RES_DIR / "images" / "background" / "rogue" / "pic_rogue_4_47.png",
+            "rogue_5": RES_DIR / "images" / "background" / "rogue" / "pic_rogue_5_KV1.png",
+        }
+        path = rogue_bg_map.get(rogue_id)
+        if path and path.exists():
+            return str(path)
+        # fallback 到默认背景
+        default = RES_DIR / "images" / "background" / "rogue" / "kv_epoque14.png"
+        return str(default) if default.exists() else self._get_bg_path("ark")
+
+    @sk.command("rogue")
+    async def cmd_rogue(self, event: AstrMessageEvent, topic: str = ""):
+        """明日方舟肉鸽战绩  用法: /sk rogue [主题名]
+
+        主题名可选：傀影、水月、萨米、萨卡兹、界园
+        不带主题名时使用默认主题。
+        """
+        sender_id = event.get_sender_id()
+        async with await get_session() as session:
+            user = await get_user_by_platform(session, sender_id)
+            if not user:
+                yield event.plain_result(self._sk("未绑定森空岛账号."))
+                event.stop_event()
+                return
+            char = await get_default_ark_character(session, user)
+            if not char:
+                yield event.plain_result(self._sk("未找到绑定的[Arknights]角色."))
+                event.stop_event()
+                return
+
+            yield event.plain_result(self._sk("正在获取肉鸽战绩，请稍候..."))
+
+            # 解析主题
+            topic_id = ""
+            if topic:
+                try:
+                    topic_id = Topics(topic).topic_id
+                except Exception:
+                    yield event.plain_result(self._sk(f"未知主题: {topic}，使用默认主题"))
+
+            cred = CRED(cred=user.cred, token=user.cred_token, userId=str(user.user_id or ""))
+            try:
+                rogue_data = await call_api_with_refresh(
+                    user, SklandAPI.get_rogue, cred, str(char.uid), topic_id
+                )
+                await session.commit()
+            except Exception as e:
+                yield event.plain_result(self._sk(self._format_error(e)))
+                event.stop_event()
+                return
+
+            try:
+                bg_path = self._get_rogue_bg_path(rogue_data.topic)
+                image_path = await render_rogue_card(self, rogue_data, bg_path)
+                yield event.image_result(image_path)
+            except Exception as e:
+                logger.exception(f"[Skland] 渲染肉鸽卡片失败: {e}")
+                yield event.plain_result(self._sk(f"肉鸽卡片渲染失败: {e}"))
+            event.stop_event()
+
+    @sk.command("rginfo")
+    async def cmd_rginfo(self, event: AstrMessageEvent, record_id: int = 1, favored: bool = False):
+        """明日方舟肉鸽战绩详情  用法: /sk rginfo [记录ID] [--favored]
+
+        需要先执行 /sk rogue 获取战绩数据。
+        record_id: 记录序号（从1开始）
+        --favored: 查看珍藏记录
+        """
+        sender_id = event.get_sender_id()
+        async with await get_session() as session:
+            user = await get_user_by_platform(session, sender_id)
+            if not user:
+                yield event.plain_result(self._sk("未绑定森空岛账号."))
+                event.stop_event()
+                return
+            char = await get_default_ark_character(session, user)
+            if not char:
+                yield event.plain_result(self._sk("未找到绑定的[Arknights]角色."))
+                event.stop_event()
+                return
+
+            yield event.plain_result(self._sk("正在获取肉鸽详情，请稍候..."))
+
+            # 获取肉鸽数据（与 rogue 命令相同）
+            cred = CRED(cred=user.cred, token=user.cred_token, userId=str(user.user_id or ""))
+            try:
+                rogue_data = await call_api_with_refresh(
+                    user, SklandAPI.get_rogue, cred, str(char.uid), ""
+                )
+                await session.commit()
+            except Exception as e:
+                yield event.plain_result(self._sk(self._format_error(e)))
+                event.stop_event()
+                return
+
+            try:
+                bg_path = self._get_rogue_bg_path(rogue_data.topic)
+                image_path = await render_rogue_info(self, rogue_data, bg_path, record_id, favored)
+                yield event.image_result(image_path)
+            except Exception as e:
+                logger.exception(f"[Skland] 渲染肉鸽详情失败: {e}")
+                yield event.plain_result(self._sk(f"肉鸽详情渲染失败: {e}"))
+            event.stop_event()
+
+    # ==================== 抽卡记录（占位） ====================
+
+    @sk.command("gacha")
+    async def cmd_gacha(self, event: AstrMessageEvent):
+        """明日方舟抽卡记录  用法: /sk gacha"""
+        yield event.plain_result(
+            self._sk("抽卡记录功能正在移植中，暂不可用。\n请使用 /sk rogue 查看肉鸽战绩。")
+        )
+
+    @sk.command("efgacha")
+    async def cmd_efgacha(self, event: AstrMessageEvent):
+        """终末地抽卡记录  用法: /sk efgacha"""
+        yield event.plain_result(
+            self._sk("终末地抽卡记录功能正在移植中，暂不可用。\n请使用 /sk efcard 查看终末地卡片。")
+        )
 
     # ==================== 工具方法 ====================
 
