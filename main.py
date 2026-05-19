@@ -721,11 +721,15 @@ class SklandPlugin(Star):
             user = await get_user_by_platform(session, sender_id)
             if not user:
                 yield event.plain_result(self._sk("未绑定森空岛账号."))
+                event.stop_event()
                 return
             char = await get_default_ark_character(session, user)
             if not char:
                 yield event.plain_result(self._sk("未找到绑定的[Arknights]角色."))
+                event.stop_event()
                 return
+
+            yield event.plain_result(self._sk("正在渲染卡片，请稍候..."))
 
             cred = CRED(cred=user.cred, token=user.cred_token)
             try:
@@ -735,15 +739,17 @@ class SklandPlugin(Star):
                 await session.commit()
             except Exception as e:
                 yield event.plain_result(self._sk(self._format_error(e)))
+                event.stop_event()
                 return
 
             try:
                 bg_path = self._get_bg_path("ark")
-                image_url = await render_ark_card(self, card_data, bg_path)
-                yield event.image_result(image_url)
+                image_path = await render_ark_card(self, card_data, bg_path)
+                yield event.image_result(image_path)
             except Exception as e:
                 logger.exception(f"[Skland] 渲染方舟卡片失败: {e}")
                 yield event.plain_result(self._sk(f"卡片渲染失败: {e}"))
+            event.stop_event()
 
     @sk.command("efcard")
     async def cmd_efcard(self, event: AstrMessageEvent):
@@ -753,11 +759,15 @@ class SklandPlugin(Star):
             user = await get_user_by_platform(session, sender_id)
             if not user:
                 yield event.plain_result(self._sk("未绑定森空岛账号."))
+                event.stop_event()
                 return
             char = await get_default_ef_character(session, user)
             if not char:
                 yield event.plain_result(self._sk("未找到绑定的[EndField]角色."))
+                event.stop_event()
                 return
+
+            yield event.plain_result(self._sk("正在渲染卡片，请稍候..."))
 
             cred = CRED(cred=user.cred, token=user.cred_token)
             try:
@@ -768,15 +778,17 @@ class SklandPlugin(Star):
                 await session.commit()
             except Exception as e:
                 yield event.plain_result(self._sk(self._format_error(e)))
+                event.stop_event()
                 return
 
             try:
                 bg_path = self._get_bg_path("endfield")
-                image_url = await render_ef_card(self, card_data, bg_path)
-                yield event.image_result(image_url)
+                image_path = await render_ef_card(self, card_data, bg_path)
+                yield event.image_result(image_path)
             except Exception as e:
                 logger.exception(f"[Skland] 渲染终末地卡片失败: {e}")
                 yield event.plain_result(self._sk(f"卡片渲染失败: {e}"))
+            event.stop_event()
 
     # ==================== 工具方法 ====================
 

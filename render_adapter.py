@@ -102,19 +102,40 @@ async def _html_to_pic(
 
 
 async def _try_star_html_render(star, html_content: str) -> str:
-    """优先尝试 AstrBot 的 html_render，失败则使用内置 Playwright fallback"""
+    """优先尝试 AstrBot 的 html_render，失败则使用内置 Playwright fallback。
+
+    返回值始终是本地文件路径（因为 event.image_result 需要路径）。
+    """
+    import logging
+    logger = logging.getLogger("astrbot")
+
     # 检查 star 是否有 html_render 方法
     if hasattr(star, "html_render"):
         try:
             wrapper = "{{ html | safe }}"
-            return await star.html_render(wrapper, {"html": html_content})
-        except Exception:
-            pass  # fallback 到内置渲染
+            url = await star.html_render(wrapper, {"html": html_content})
+            logger.debug(f"[Skland] html_render 返回: {url}")
+            # 如果返回的是本地路径或 file:// 协议，转换为纯路径
+            if url.startswith("file://"):
+                return url[7:]
+            if url.startswith("http"):
+                # URL 形式，fallback 到本地渲染
+                logger.warning(f"[Skland] html_render 返回 URL {url}，使用本地 Playwright fallback")
+            else:
+                # 假设是本地路径
+                return url
+        except Exception as e:
+            logger.warning(f"[Skland] html_render 失败，使用 Playwright fallback: {e}")
+
     return await _html_to_pic(html_content)
 
 
 async def render_ark_card(star, card_data: ArkCard, bg_path: str) -> str:
     """渲染明日方舟角色卡片为图片路径"""
+    import logging
+    logger = logging.getLogger("astrbot")
+
+    logger.debug("[Skland] 开始渲染方舟卡片模板...")
     template = _jinja_env.get_template("ark_card.html.jinja2")
 
     rendered_html = await template.render_async(
@@ -134,6 +155,7 @@ async def render_ark_card(star, card_data: ArkCard, bg_path: str) -> str:
         tower=card_data.tower,
         training_char=card_data.trainee_char,
     )
+    logger.debug("[Skland] 模板渲染完成")
 
     width_clamp = _make_width_clamp_style(706)
     if "</head>" in rendered_html:
@@ -141,7 +163,10 @@ async def render_ark_card(star, card_data: ArkCard, bg_path: str) -> str:
     else:
         rendered_html = width_clamp + rendered_html
 
-    return await _try_star_html_render(star, rendered_html)
+    logger.debug("[Skland] 开始截图渲染...")
+    result = await _try_star_html_render(star, rendered_html)
+    logger.debug(f"[Skland] 截图完成: {result}")
+    return result
 
 
 async def render_ef_card(
