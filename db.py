@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 
 logger = logging.getLogger(__name__)
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column
-from sqlalchemy import String, Text, Boolean, select
+from sqlalchemy import String, Text, Boolean, select, text
 
 Base = declarative_base()
 
@@ -27,6 +27,8 @@ class SkUser(Base):
     access_token: Mapped[str] = mapped_column(Text, nullable=True)
     cred: Mapped[str] = mapped_column(Text)
     cred_token: Mapped[str] = mapped_column(Text)
+    # 统一消息来源（用于定时任务推送消息）
+    umo: Mapped[str] = mapped_column(Text, nullable=True)
 
 
 class Character(Base):
@@ -40,6 +42,26 @@ class Character(Base):
     channel_master_id: Mapped[str] = mapped_column(Text)
     nickname: Mapped[str] = mapped_column(Text)
     isdefault: Mapped[bool] = mapped_column(default=False)
+
+
+class StaminaAlert(Base):
+    """体力预警状态表
+
+    每个角色一行，记录是否已经发送过当前满体周期的预警。
+    当体力从90%以下升到90%以上时发送一次；降到90%以下后重置。
+    """
+    __tablename__ = "skland_stamina_alert"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    # 关联 SkUser.id
+    user_id: Mapped[int] = mapped_column()
+    # 角色UID
+    char_uid: Mapped[str] = mapped_column(Text)
+    # 游戏类型：arknights / endfield
+    game: Mapped[str] = mapped_column(String)
+    # 是否已经发送过当前周期的预警
+    alerted: Mapped[bool] = mapped_column(default=False)
+    # 最后检查时间戳
+    last_check_time: Mapped[int] = mapped_column(nullable=True)
 
 
 # 模块级单例：避免重复创建引擎
@@ -84,6 +106,13 @@ async def init_db(db_path: str = None, force: bool = False):
         _engine = create_async_engine(f"sqlite+aiosqlite:///{path}")
         async with _engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            # 迁移：为旧表添加 umo 列（如果不存在）
+            result = await conn.execute(
+                text("SELECT name FROM pragma_table_info('skland_user') WHERE name = 'umo'")
+            )
+            if not result.fetchone():
+                await conn.execute(text("ALTER TABLE skland_user ADD COLUMN umo TEXT"))
+                logger.info("[Skland] 数据库迁移：skland_user 添加 umo 列")
         _session_maker = async_sessionmaker(_engine, expire_on_commit=False)
         logger.info(f"[Skland] 数据库已初始化: {path}")
 
@@ -148,3 +177,33 @@ async def get_ef_characters(session: AsyncSession, user: SkUser) -> list[Charact
         )
     )
     return list(result.scalars().all())
+
+
+async def get_all_users_with_umos(session: AsyncSession) -> list[SkUser]:
+    """获取所有已保存 UMO 的用户（用于定时任务推送）"""
+    result = await session.execute(
+        select(SkUser).where(SkUser.umo.isnot(None))
+    )
+    return list(result.scalars().all())
+
+
+async def get_stamina_alert(session: AsyncSession, user_id: int, char_uid: str, game: str) -> StaminaAlert | None:
+    """获取指定角色的预警状态"""
+    result = await session.execute(
+        select(StaminaAlert).where(
+            StaminaAlert.user_id == user_id,
+            StaminaAlert.char_uid == char_uid,
+            StaminaAlert.game == game
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_or_create_stamina_alert(session: AsyncSession, user_id: int, char_uid: str, game: str) -> StaminaAlert:
+    """获取或创建角色的预警状态记录"""
+    alert = await get_stamina_alert(session, user_id, char_uid, game)
+    if alert is None:
+        alert = StaminaAlert(user_id=user_id, char_uid=char_uid, game=game)
+        session.add(alert)
+        await session.flush()
+    return alert

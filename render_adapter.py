@@ -6,9 +6,15 @@ AstrBot 也可能提供 html_render（基于 Playwright）。
 本模块优先使用 AstrBot 的 html_render，如果不可用则使用内置 Playwright fallback。
 """
 
+import base64
 import jinja2
+import mimetypes
+import re
 from pathlib import Path
 from datetime import datetime
+
+# Pillow 用于截图后裁剪右侧空白
+from PIL import Image
 
 from .schemas import (
     ArkCard,
@@ -85,6 +91,103 @@ def _make_width_clamp_style(width: int = 706) -> str:
 """
 
 
+def _inline_resources(html_content: str, base_dir: Path) -> str:
+    """将 HTML 中的本地资源路径替换为 base64 data URL。
+
+    AstrBot 的 html_render 使用外部网络渲染服务，无法访问本地 file:// 资源。
+    通过将图片、字体等资源内联为 base64，确保外部服务能正确渲染所有元素。
+    """
+
+    def _resolve_path(path: str) -> Path | None:
+        """解析相对路径为绝对路径"""
+        # 跳过已经是远程 URL 或 data URL 的路径
+        if path.startswith(("http://", "https://", "data:")):
+            return None
+        if path.startswith("../"):
+            full = (base_dir / path).resolve()
+        elif path.startswith("./"):
+            full = (base_dir / path[2:]).resolve()
+        elif path.startswith("file://"):
+            full = Path(path[7:])
+        else:
+            full = (base_dir / path).resolve()
+        return full if full.exists() else None
+
+    def _to_data_url(path: str) -> str:
+        full = _resolve_path(path)
+        if not full:
+            return path
+        mime, _ = mimetypes.guess_type(str(full))
+        if not mime:
+            mime = "application/octet-stream"
+        data = base64.b64encode(full.read_bytes()).decode()
+        return f"data:{mime};base64,{data}"
+
+    # 替换 img src="..."
+    def _replace_img(match: re.Match) -> str:
+        return f'src="{_to_data_url(match.group(1))}"'
+
+    html_content = re.sub(r'src="([^"]+)"', _replace_img, html_content)
+
+    # 替换 CSS url("...") 和 url('...')
+    def _replace_url(match: re.Match) -> str:
+        return f'url("{_to_data_url(match.group(1))}")'
+
+    html_content = re.sub(r'url\("([^"]+)"\)', _replace_url, html_content)
+    html_content = re.sub(r"url\('([^']+)'\)", _replace_url, html_content)
+
+    return html_content
+
+
+def _crop_image(image_path: str, html_content: str, width: int, device_scale_factor: float) -> str:
+    """使用 Pillow 裁剪图片右侧空白。
+
+    外部渲染服务可能使用固定 viewport 宽度，导致图片宽度大于实际内容宽度。
+    本函数根据 HTML 中的 CSS 尺寸或传入参数推断真实内容宽度并裁剪。
+
+    Args:
+        image_path: 图片文件路径
+        html_content: 原始 HTML 内容，用于提取 CSS 固定高度以推断 dsf
+        width: 调用方传入的期望宽度（CSS 像素）
+        device_scale_factor: 传入的设备缩放因子（服务可能忽略）
+
+    Returns:
+        裁剪后的图片路径（若无需裁剪则返回原路径）
+    """
+    try:
+        with Image.open(image_path) as img:
+            W_act, H_act = img.size
+
+            # 1. 从 HTML 中提取固定 CSS 高度，用于精确推断实际 dsf
+            h_match = re.search(r'h-\[(\d+(?:\.\d+)?)px\]', html_content)
+            css_height = float(h_match.group(1)) if h_match else 0
+
+            if css_height > 0:
+                # 有固定高度模板（如 ark_card 1160px），dsf = 实际高度 / CSS 高度
+                dsf = H_act / css_height
+            else:
+                # 无固定高度（h-auto），通过宽度启发式推断 dsf
+                expected_w = width * device_scale_factor
+                # 若实际宽度接近预期（容差 10% 或 50px），说明服务使用了传入的 dsf
+                if abs(W_act - expected_w) <= max(width * 0.1, 50):
+                    dsf = device_scale_factor
+                else:
+                    # 服务可能使用固定 viewport 而忽略了 dsf，按 dsf=1.0 处理
+                    dsf = 1.0
+
+            target_width = int(width * dsf)
+
+            # 只有当实际宽度明显大于目标宽度时才裁剪，避免误裁
+            if W_act > target_width + 30:
+                cropped = img.crop((0, 0, target_width, H_act))
+                cropped.save(image_path, "PNG")
+    except Exception:
+        # 裁剪失败不应阻断主流程，静默回退
+        pass
+
+    return image_path
+
+
 async def _html_to_pic(
     html_content: str,
     width: int = 706,
@@ -119,19 +222,35 @@ async def _html_to_pic(
 
     async with async_playwright() as p:
         browser = await p.chromium.launch()
+        # 将 base_url 传给 new_page，使模板中的相对路径资源（CSS、图片）能正确解析
         page = await browser.new_page(
-            viewport={"width": width, "height": max(height, 1)},
+            viewport={"width": width, "height": max(height, 1200)},
             device_scale_factor=device_scale_factor,
+            base_url=base_url or f"file://{TEMPLATES_DIR}",
         )
-        # 设置 base_url，让模板中的相对路径资源（CSS、图片）能正确加载
         await page.set_content(
             html_content,
             wait_until="networkidle",
-            base_url=base_url or f"file://{TEMPLATES_DIR}",
         )
+        # 等待布局稳定，确保所有 CSS 计算完成
+        await page.wait_for_timeout(300)
+        # 获取内容实际尺寸，避免 full_page 截取到多余空白
+        dimensions = await page.evaluate("""() => {
+            const body = document.body;
+            const html = document.documentElement;
+            return {
+                width: Math.max(body.scrollWidth, body.offsetWidth, html.clientWidth, html.scrollWidth, html.offsetWidth),
+                height: Math.max(body.scrollHeight, body.offsetHeight, html.clientHeight, html.scrollHeight, html.offsetHeight)
+            };
+        }""")
+        # 设置 viewport 匹配内容尺寸，确保截图完整
+        await page.set_viewport_size({
+            "width": max(dimensions["width"], width),
+            "height": max(dimensions["height"], 1)
+        })
         await page.screenshot(
             path=str(file_name),
-            full_page=full_page,
+            full_page=True,
         )
         await browser.close()
 
@@ -158,15 +277,28 @@ async def _try_star_html_render(
     # 检查 star 是否有 html_render 方法
     if hasattr(star, "html_render"):
         try:
+            # 将本地资源内联为 base64，使外部渲染服务能正确加载图片、字体
+            inlined_html = _inline_resources(html_content, TEMPLATES_DIR)
             wrapper = "{{ html | safe }}"
-            # 尝试传递额外的渲染参数（部分 AstrBot 版本支持）
-            url = await star.html_render(wrapper, {"html": html_content})
+            # 传递高质量渲染参数，覆盖默认的 jpeg/quality=40
+            # 同时传递 viewport 尺寸，防止外部服务使用默认宽度导致右侧空白
+            url = await star.html_render(
+                wrapper,
+                {"html": inlined_html},
+                options={
+                    "type": "png",
+                    "quality": 100,
+                    "full_page": True,
+                    "width": width,
+                    "deviceScaleFactor": device_scale_factor,
+                },
+            )
             logger.debug(f"[Skland] html_render 返回: {url}")
-            # 如果返回的是本地路径或 file:// 协议，转换为纯路径
+            # 统一获取本地图片路径
             if url.startswith("file://"):
-                return url[7:]
-            if url.startswith("http"):
-                # URL 形式，下载到本地缓存后返回路径
+                local_path = url[7:]
+            elif url.startswith("http"):
+                # URL 形式，下载到本地缓存
                 logger.info(f"[Skland] html_render 返回 URL，正在下载图片...")
                 import httpx
 
@@ -180,11 +312,15 @@ async def _try_star_html_render(
                         / f"skland_card_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
                     )
                     file_name.write_bytes(resp.content)
-                    logger.info(f"[Skland] 图片下载完成: {file_name}")
-                    return str(file_name)
+                    local_path = str(file_name)
+                    logger.info(f"[Skland] 图片下载完成: {local_path}")
             else:
                 # 假设是本地路径
-                return url
+                local_path = url
+
+            # 裁剪右侧可能存在的空白（外部服务固定 viewport 导致）
+            _crop_image(local_path, html_content, width, device_scale_factor)
+            return local_path
         except Exception as e:
             logger.warning(f"[Skland] html_render 失败，使用 Playwright fallback: {e}")
 

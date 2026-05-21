@@ -19,11 +19,14 @@ from .db import (
     get_session,
     SkUser,
     Character,
+    StaminaAlert,
     get_user_by_platform,
     get_default_ark_character,
     get_default_ef_character,
     get_ark_characters,
     get_ef_characters,
+    get_all_users_with_umos,
+    get_or_create_stamina_alert,
 )
 from .api import SklandAPI, SklandLoginAPI
 from .schemas import CRED, Topics, RogueData, Clue
@@ -49,11 +52,16 @@ class SklandPlugin(Star):
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = self.data_dir / "skland.db"
         self._qrcode_tasks: dict[str, dict] = {}
+        # 体力预警后台任务
+        self._alert_task = None
+        self._alert_stop_event = asyncio.Event()
 
     @filter.on_astrbot_loaded()
     async def on_loaded(self):
         await init_db(str(self.db_path))
         logger.info("[Skland] 插件已加载，数据库就绪")
+        # 启动体力预警后台轮询
+        self._start_stamina_alert_loop()
 
     @staticmethod
     def _format_error(e: Exception) -> str:
@@ -184,6 +192,7 @@ class SklandPlugin(Star):
                         existing.cred = cred_data.cred
                         existing.cred_token = cred_data.token
                         existing.access_token = token
+                        existing.umo = umo
                         if skland_user_id:
                             existing.user_id = skland_user_id
                         user = existing
@@ -194,6 +203,7 @@ class SklandPlugin(Star):
                             access_token=token,
                             cred=cred_data.cred,
                             cred_token=cred_data.token,
+                            umo=umo,
                         )
                         session.add(user)
                         await session.flush()
@@ -276,14 +286,16 @@ class SklandPlugin(Star):
     async def cmd_bind(self, event: AstrMessageEvent, cred: str, cred_token: str):
         """手动绑定  用法: /sk bind <cred> <cred_token>"""
         sender_id = event.get_sender_id()
+        umo = event.unified_msg_origin
         async with await get_session() as session:
             existing = await get_user_by_platform(session, sender_id)
             if existing:
                 existing.cred = cred
                 existing.cred_token = cred_token
+                existing.umo = umo
                 user = existing
             else:
-                user = SkUser(platform_user_id=sender_id, cred=cred, cred_token=cred_token)
+                user = SkUser(platform_user_id=sender_id, cred=cred, cred_token=cred_token, umo=umo)
                 session.add(user)
                 await session.flush()
 
@@ -483,7 +495,7 @@ class SklandPlugin(Star):
             return
         if ef_results:
             if all_results:
-                all_results.append("")
+                all_results.append("")  # 仅用一个空行分隔两个游戏区块
             all_results.append("[EndField]")
             all_results.extend(ef_results)
 
@@ -491,7 +503,8 @@ class SklandPlugin(Star):
             yield event.plain_result(self._sk("未找到任何可签到的角色."))
             return
 
-        yield event.plain_result(self._sk("\n\n".join(all_results)))
+        # 使用单换行拼接，避免角色之间出现多余空行
+        yield event.plain_result(self._sk("\n".join(all_results)))
 
     # ==================== COS 图片 ====================
 
@@ -549,6 +562,7 @@ class SklandPlugin(Star):
     async def cmd_arkmr(self, event: AstrMessageEvent):
         """明日方舟看板  用法: /sk arkmr"""
         sender_id = event.get_sender_id()
+        await self._ensure_user_umo(event)
         async with await get_session() as session:
             user = await get_user_by_platform(session, sender_id)
             if not user:
@@ -630,6 +644,7 @@ class SklandPlugin(Star):
     async def cmd_efmr(self, event: AstrMessageEvent):
         """终末地看板  用法: /sk efmr"""
         sender_id = event.get_sender_id()
+        await self._ensure_user_umo(event)
         async with await get_session() as session:
             user = await get_user_by_platform(session, sender_id)
             if not user:
@@ -707,13 +722,16 @@ class SklandPlugin(Star):
     async def cmd_mr(self, event: AstrMessageEvent):
         """综合看板(管理员)  用法: /sk mr"""
         sender_id = event.get_sender_id()
+        await self._ensure_user_umo(event)
         async with await get_session() as session:
             user = await get_user_by_platform(session, sender_id)
             if not user:
                 yield event.plain_result(self._sk("未绑定森空岛账号."))
                 return
 
-            final_lines = ["══^森空岛综合看板^══", ""]
+            # 分别收集两个游戏的输出，只在真正需要时插入空行
+            ark_lines: list[str] = []
+            ef_lines: list[str] = []
 
             # 方舟
             ark_char = await get_default_ark_character(session, user)
@@ -723,16 +741,13 @@ class SklandPlugin(Star):
                     ark_card = await call_api_with_refresh(
                         user, SklandAPI.ark_card, cred, str(ark_char.uid)
                     )
-                    final_lines.append("[Arknights]")
-                    final_lines.extend(self._format_arkmr(ark_card))
-                    final_lines.append("")
+                    ark_lines.append("[Arknights]")
+                    ark_lines.extend(self._format_arkmr(ark_card))
                 except Exception as e:
-                    final_lines.append(f"[Arknights]{self._format_error(e)}")
-                    final_lines.append("")
+                    ark_lines.append(f"[Arknights]{self._format_error(e)}")
                 await session.commit()
             else:
-                final_lines.append("[Arknights]未绑定角色")
-                final_lines.append("")
+                ark_lines.append("[Arknights]未绑定角色")
 
             # 终末地
             ef_char = await get_default_ef_character(session, user)
@@ -743,16 +758,20 @@ class SklandPlugin(Star):
                     ef_card = await call_api_with_refresh(
                         user, SklandAPI.endfield_card, cred, skland_uid, ef_char
                     )
-                    final_lines.append("[EndField]")
-                    final_lines.extend(self._format_efmr(ef_card))
-                    final_lines.append("")
+                    ef_lines.append("[EndField]")
+                    ef_lines.extend(self._format_efmr(ef_card))
                 except Exception as e:
-                    final_lines.append(f"[EndField]{self._format_error(e)}")
-                    final_lines.append("")
+                    ef_lines.append(f"[EndField]{self._format_error(e)}")
                 await session.commit()
             else:
-                final_lines.append("[EndField]未绑定角色")
-                final_lines.append("")
+                ef_lines.append("[EndField]未绑定角色")
+
+            # 合并：标题 + 方舟 + （如有需要）空行 + 终末地
+            final_lines = ["══^森空岛综合看板^══"]
+            final_lines.extend(ark_lines)
+            if ark_lines and ef_lines:
+                final_lines.append("")  # 仅用一个空行分隔两个游戏区块
+            final_lines.extend(ef_lines)
             yield event.plain_result(self._sk("\n".join(final_lines)))
 
     # ==================== 卡片渲染 ====================
@@ -978,6 +997,179 @@ class SklandPlugin(Star):
         yield event.plain_result(
             self._sk("终末地抽卡记录功能正在移植中，暂不可用。\n请使用 /sk efcard 查看终末地卡片。")
         )
+
+    # ==================== 体力预警 ====================
+
+    async def _ensure_user_umo(self, event: AstrMessageEvent):
+        """确保用户的 UMO 已记录到数据库，用于定时任务发消息
+
+        每个命令入口都会调用，已绑定用户会自动更新 UMO。
+        """
+        sender_id = event.get_sender_id()
+        umo = event.unified_msg_origin
+        try:
+            async with await get_session() as session:
+                user = await get_user_by_platform(session, sender_id)
+                if user and user.umo != umo:
+                    user.umo = umo
+                    await session.commit()
+        except Exception as e:
+            logger.debug(f"[Skland] 保存 UMO 失败: {e}")
+
+    def _start_stamina_alert_loop(self):
+        """启动体力预警后台轮询任务"""
+        if self._alert_task and not self._alert_task.done():
+            return
+        self._alert_stop_event.clear()
+        self._alert_task = asyncio.create_task(self._stamina_alert_loop())
+        logger.info("[Skland] 体力预警轮询已启动，间隔 1 小时")
+
+    async def _stamina_alert_loop(self):
+        """体力预警主循环：每小时检查一次所有绑定用户的体力
+
+        流程：
+        1. 等待 30 秒让框架完全初始化
+        2. 循环执行检查，直到收到停止信号
+        3. 每次检查间隔 1 小时
+        """
+        await asyncio.sleep(30)
+        while not self._alert_stop_event.is_set():
+            try:
+                await self._check_all_stamina()
+            except Exception as e:
+                logger.exception(f"[Skland] 体力预警检查异常: {e}")
+            # 等待 1 小时或直到停止事件触发
+            try:
+                await asyncio.wait_for(self._alert_stop_event.wait(), timeout=3600)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _check_all_stamina(self):
+        """检查所有已保存 UMO 的用户的体力状态"""
+        async with await get_session() as session:
+            users = await get_all_users_with_umos(session)
+        if not users:
+            return
+        logger.info(f"[Skland] 体力预警：开始检查 {len(users)} 个用户")
+        for user in users:
+            try:
+                await self._check_user_stamina(user)
+            except Exception as e:
+                logger.warning(f"[Skland] 检查用户 {user.platform_user_id} 体力失败: {e}")
+        logger.info("[Skland] 体力预警：本轮检查完成")
+
+    async def _check_user_stamina(self, user: SkUser):
+        """检查单个用户的所有角色体力"""
+        async with await get_session() as session:
+            # 明日方舟角色
+            ark_chars = await get_ark_characters(session, user)
+            for char in ark_chars:
+                await self._check_ark_stamina(session, user, char)
+            # 终末地角色
+            ef_chars = await get_ef_characters(session, user)
+            for char in ef_chars:
+                await self._check_ef_stamina(session, user, char)
+            await session.commit()
+
+    async def _check_ark_stamina(self, session, user: SkUser, char: Character):
+        """检查明日方舟角色理智，超过阈值时发送预警
+
+        预警逻辑：
+        - 理智 >= 90% 且未预警 → 发送消息并标记已预警
+        - 理智 < 90% 且已预警 → 重置预警状态
+        """
+        cred = CRED(cred=user.cred, token=user.cred_token)
+        try:
+            card = await call_api_with_refresh(
+                user, SklandAPI.ark_card, cred, str(char.uid)
+            )
+        except Exception as e:
+            logger.debug(f"[Skland] 获取方舟看板失败 ({char.nickname}): {e}")
+            return
+
+        ap = card.status.ap
+        ap_now = ap.ap_now
+        max_ap = ap.max
+        ratio = ap_now / max_ap if max_ap > 0 else 0
+
+        alert = await get_or_create_stamina_alert(session, user.id, char.uid, "arknights")
+
+        if ratio >= 0.9:
+            if not alert.alerted:
+                msg = (
+                    f"[Sklands 体力预警]\n"
+                    f"游戏：明日方舟\n"
+                    f"角色：{card.status.name}\n"
+                    f"理智：{ap_now}/{max_ap} ({ratio * 100:.0f}%)\n"
+                    f"理智已满或即将回满，请及时清理！"
+                )
+                chain = MessageChain()
+                chain.chain = [Comp.Plain(self._sk(msg))]
+                try:
+                    await self.context.send_message(user.umo, chain)
+                    alert.alerted = True
+                    logger.info(
+                        f"[Skland] 已发送方舟体力预警: {user.platform_user_id} / {card.status.name}"
+                    )
+                except Exception as e:
+                    logger.warning(f"[Skland] 发送预警消息失败: {e}")
+        else:
+            if alert.alerted:
+                alert.alerted = False
+                logger.debug(
+                    f"[Skland] 重置方舟预警状态: {user.platform_user_id} / {char.nickname}"
+                )
+        alert.last_check_time = int(datetime.now().timestamp())
+
+    async def _check_ef_stamina(self, session, user: SkUser, char: Character):
+        """检查终末地角色体力，超过阈值时发送预警"""
+        cred = CRED(cred=user.cred, token=user.cred_token)
+        try:
+            skland_uid = user.user_id or user.platform_user_id
+            card = await call_api_with_refresh(
+                user, SklandAPI.endfield_card, cred, skland_uid, char
+            )
+        except Exception as e:
+            logger.debug(f"[Skland] 获取终末地看板失败 ({char.nickname}): {e}")
+            return
+
+        dungeon = card.dungeon
+        try:
+            cur_ap = int(dungeon.curStamina) if dungeon.curStamina else 0
+            max_ap = int(dungeon.maxStamina) if dungeon.maxStamina else 1
+        except (ValueError, TypeError):
+            return
+
+        ratio = cur_ap / max_ap if max_ap > 0 else 0
+
+        alert = await get_or_create_stamina_alert(session, user.id, char.uid, "endfield")
+
+        if ratio >= 0.9:
+            if not alert.alerted:
+                msg = (
+                    f"[Sklands 体力预警]\n"
+                    f"游戏：终末地\n"
+                    f"角色：{card.base.name}\n"
+                    f"体力：{cur_ap}/{max_ap} ({ratio * 100:.0f}%)\n"
+                    f"体力已满或即将回满，请及时清理！"
+                )
+                chain = MessageChain()
+                chain.chain = [Comp.Plain(self._sk(msg))]
+                try:
+                    await self.context.send_message(user.umo, chain)
+                    alert.alerted = True
+                    logger.info(
+                        f"[Skland] 已发送终末地体力预警: {user.platform_user_id} / {card.base.name}"
+                    )
+                except Exception as e:
+                    logger.warning(f"[Skland] 发送预警消息失败: {e}")
+        else:
+            if alert.alerted:
+                alert.alerted = False
+                logger.debug(
+                    f"[Skland] 重置终末地预警状态: {user.platform_user_id} / {char.nickname}"
+                )
+        alert.last_check_time = int(datetime.now().timestamp())
 
     # ==================== 工具方法 ====================
 
