@@ -201,29 +201,53 @@ def _get_hd_url(url: str) -> str:
     return url
 
 
-def _extract_image_entries(posts: list[dict]) -> list[dict]:
+def _extract_image_entries(posts: list[dict], _debug_print_structure: bool = False) -> list[dict]:
     """从帖子列表中提取图片元数据
 
     返回每项包含：
     - url: 高清图片 URL（已去除缩略图参数）
     - post_url: 帖子在森空岛的链接
     - title: 帖子标题
+    - author: 作者昵称
+    - like_count: 点赞数（API 返回时）
+    - view_count: 浏览量（API 返回时）
+    - comment_count: 评论数（API 返回时）
 
     社区 API 的帖子结构：
     - entry["item"]["imageListSlice"]: 图片列表，每项含 url 字段
     - entry["item"]["id"]: 帖子 ID
+    - entry["user"]["nickname"]: 作者昵称
     """
     entries: list[dict] = []
     seen_urls: set[str] = set()
-    for entry in posts:
+
+    for idx, entry in enumerate(posts):
         if not isinstance(entry, dict):
             continue
+
+        # 调试用：首次调用时打印一条完整的原始帖子结构，帮助确认可用字段
+        if _debug_print_structure and idx == 0:
+            logger.info(f"[SklandCos] 帖子结构样例: {json.dumps(entry, ensure_ascii=False, default=str)[:1200]}")
+
+        # 提取作者信息
+        user = entry.get("user", {})
+        author = ""
+        if isinstance(user, dict):
+            author = user.get("nickname", "") or user.get("name", "")
+
         item = entry.get("item", {})
         if not isinstance(item, dict):
             continue
+
         post_id = item.get("id", "")
         post_url = f"https://www.skland.com/article?id={post_id}" if post_id else ""
         title = item.get("title", "") or ""
+
+        # 尝试提取互动数据（字段名需根据实际 API 响应确认）
+        like_count = item.get("likeCount") or item.get("like_count") or item.get("likes") or 0
+        view_count = item.get("viewCount") or item.get("view_count") or item.get("views") or 0
+        comment_count = item.get("commentCount") or item.get("comment_count") or item.get("comments") or 0
+
         for img in item.get("imageListSlice", []):
             raw_url = img.get("url", "") if isinstance(img, dict) else str(img)
             if not raw_url or not raw_url.startswith("http"):
@@ -238,20 +262,44 @@ def _extract_image_entries(posts: list[dict]) -> list[dict]:
                 "url": hd_url,
                 "post_url": post_url,
                 "title": title,
+                "author": author,
+                "like_count": int(like_count) if like_count else 0,
+                "view_count": int(view_count) if view_count else 0,
+                "comment_count": int(comment_count) if comment_count else 0,
             })
     logger.info(f"[SklandCos] 从 {len(posts)} 条帖子中提取 {len(entries)} 张图片")
     return entries
 
 
-async def fetch_cos_images(cred_str: str, keyword: str = "") -> list[dict]:
+def _sort_by_popularity(entries: list[dict]) -> list[dict]:
+    """按热度排序：优先点赞数，其次浏览量，其次评论数"""
+    return sorted(
+        entries,
+        key=lambda e: (e.get("like_count", 0), e.get("view_count", 0), e.get("comment_count", 0)),
+        reverse=True,
+    )
+
+
+def _pick_from_top_n(entries: list[dict], top_n: int = 20) -> list[dict]:
+    """从热度 Top N 中随机打乱返回，避免全局随机抽到冷门低质图"""
+    top = entries[:top_n] if len(entries) > top_n else entries
+    random.shuffle(top)
+    return top
+
+
+async def fetch_cos_images(
+    cred_str: str, keyword: str = "", top_n: int = 20
+) -> list[dict]:
     """获取森空岛 COS 图片元数据列表
 
     Args:
         cred_str: 森空岛 cred（即 SK_OAUTH_CRED_KEY 的值）
         keyword: 角色关键词，如"阿米娅"
+        top_n: 从热度前 N 中随机选取，默认 20
 
     Returns:
-        图片元数据列表（已随机打乱），每项包含 url/post_url/title。
+        图片元数据列表（已按热度排序并 Top-N 随机），每项包含
+        url/post_url/title/author/like_count/view_count/comment_count。
         未找到时返回空列表。
     """
     if not cred_str:
@@ -268,19 +316,27 @@ async def fetch_cos_images(cred_str: str, keyword: str = "") -> list[dict]:
         if not keyword:
             result: list[dict] = []
             list_id = _random_list_id()
-            for _ in range(5):
-                posts, has_more = await _fetch_tag_index_page(
-                    client, cred_str, did, COSPLAY_TAG_ID, list_id, sort_type="2"
-                )
-                if not posts:
+            # sort_type 尝试 "1"（可能为最热/推荐），失败则回退 "2"（最新）
+            sort_type_candidates = ["1", "2"]
+            for sort_type in sort_type_candidates:
+                for _ in range(5):
+                    posts, has_more = await _fetch_tag_index_page(
+                        client, cred_str, did, COSPLAY_TAG_ID, list_id, sort_type=sort_type
+                    )
+                    if not posts:
+                        break
+                    result.extend(_extract_image_entries(posts, _debug_print_structure=(sort_type == "1" and _ == 0)))
+                    if not has_more:
+                        break
+                if result:
+                    logger.info(f"[SklandCos] 无关键词模式 sort_type={sort_type} 共获取 {len(result)} 张")
                     break
-                result.extend(_extract_image_entries(posts))
-                if not has_more:
-                    break
+
             if result:
-                random.shuffle(result)
-            logger.info(f"[SklandCos] 无关键词模式共获取 {len(result)} 张")
-            return result
+                sorted_result = _sort_by_popularity(result)
+                return _pick_from_top_n(sorted_result, top_n)
+            logger.info("[SklandCos] 无关键词模式未获取到任何图片")
+            return []
 
         # ---------- 有关键词模式：先尝试 feed/index 标题匹配 ----------
         posts = await _feed_index(client, cred_str, did, limit=100)
@@ -292,11 +348,15 @@ async def fetch_cos_images(cred_str: str, keyword: str = "") -> list[dict]:
             if keyword_lower in title.lower():
                 matched.append(entry)
 
-        result = _extract_image_entries(matched)
+        result = _extract_image_entries(matched, _debug_print_structure=True)
         if result:
-            random.shuffle(result)
-            logger.info(f"[SklandCos] 关键词'{keyword}' 匹配到 {len(result)} 张")
-            return result
+            sorted_result = _sort_by_popularity(result)
+            logger.info(
+                f"[SklandCos] 关键词'{keyword}' 匹配到 {len(result)} 张，"
+                f"热度最高: 👍{sorted_result[0].get('like_count', 0)} "
+                f"👁{sorted_result[0].get('view_count', 0)}"
+            )
+            return _pick_from_top_n(sorted_result, top_n)
 
         logger.info(f"[SklandCos] 关键词'{keyword}' 未匹配到任何图片")
         return result

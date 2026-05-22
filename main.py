@@ -540,19 +540,36 @@ class SklandPlugin(Star):
                     )
                 return
 
-            # 只取第一张返回
+            # 只取第一张返回（fetch_cos_images 已按热度排序并从 Top-N 随机）
             entry = images[0]
             image_url = entry["url"]
             post_url = entry.get("post_url", "")
+            author = entry.get("author", "")
+            title = entry.get("title", "")
+            like_count = entry.get("like_count", 0)
+            view_count = entry.get("view_count", 0)
+
+            # 构建底部信息行
+            info_lines: list[str] = []
+            if author:
+                info_lines.append(f"作者: {author}")
+            if title:
+                info_lines.append(f"标题: {title}")
+            if like_count or view_count:
+                info_lines.append(f"👍 {like_count}  👁 {view_count}")
+            if post_url:
+                info_lines.append(f"来源: {post_url}")
+            footer = "\n".join(info_lines) if info_lines else ""
+
             try:
                 local_path = await _download_image(image_url)
                 yield event.image_result(local_path)
-                if post_url:
-                    yield event.plain_result(self._sk(f"来源: {post_url}"))
+                if footer:
+                    yield event.plain_result(self._sk(footer))
             except Exception as e:
                 logger.warning(f"[Skland] 下载 COS 图片失败: {e}, 尝试直接返回 URL")
-                if post_url:
-                    yield event.plain_result(self._sk(f"图片获取失败，来源: {post_url}"))
+                if footer:
+                    yield event.plain_result(self._sk(f"图片获取失败\n{footer}"))
                 else:
                     yield event.plain_result(self._sk(f"图片获取失败: {e}"))
 
