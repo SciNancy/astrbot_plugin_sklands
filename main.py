@@ -617,12 +617,26 @@ class SklandPlugin(Star):
             recover_secs = max(0, ap.completeRecoveryTime - now_ts)
             ap_str = f"{ap_now} / {ap.max}  ({self._fmt_time(recover_secs)})"
 
-        # 公招
+        # 公招：只统计真正进行中的招募（state!=1 且 startTs>0 说明已放置标签）
         finished = card.recruit_finished
         total_r = len(card.recruit)
-        recruit_str = f"{finished} / {total_r} 完成"
-        if card.recruit and finished < total_r:
-            recruit_str += f"  ({card.recruit_complete_time})"
+        active_count = sum(
+            1 for r in card.recruit
+            if r.state != 1 and r.startTs > 0
+        )
+        if total_r == 0 or active_count == 0:
+            recruit_str = "暂未公招"
+        else:
+            active_finishes = [
+                r.finishTs for r in card.recruit
+                if r.state != 1 and r.startTs > 0 and r.finishTs > now_ts
+            ]
+            if active_finishes:
+                earliest = min(active_finishes)
+                remain = self._fmt_time(earliest - now_ts)
+                recruit_str = f"{finished}/{total_r} ✓ ({remain})"
+            else:
+                recruit_str = f"{finished}/{total_r} ✓"
 
         # 剿灭
         c = card.campaign
@@ -635,16 +649,19 @@ class SklandPlugin(Star):
         daily = card.routine.daily
         weekly = card.routine.weekly
 
-        # 训练室
+        # 训练室：空闲单行，进行中拆分为两行
         training = getattr(card.building, "training", None) if card.building else None
-        if training and training.trainee:
+        if training and training.trainee and training.trainee.targetSkill != -1:
             char_info = card.charInfoMap.get(training.trainee.charId)
             trainee_name = char_info.name if char_info else "未知"
             skill_name = training.training_state
             remain = max(0, training.remainSecs)
-            train_str = f"{trainee_name}  {skill_name}  (剩余 {self._fmt_time(remain)})"
+            train_lines = [
+                f"  训练室:  训练: {trainee_name} {skill_name}",
+                f"     剩余 {self._fmt_time(remain)}",
+            ]
         else:
-            train_str = "空闲中"
+            train_lines = [f"  训练室:  训练: 空闲中"]
 
         lines = [
             f"═ {s.name}",
@@ -653,7 +670,7 @@ class SklandPlugin(Star):
             f"  剿灭:    {jm_str}",
             f"  每日:    {daily.current} / {daily.total}",
             f"  每周:    {weekly.current} / {weekly.total}",
-            f"  训练室:  {train_str}",
+            *train_lines,
         ]
         return lines
 
