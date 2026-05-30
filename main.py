@@ -657,11 +657,11 @@ class SklandPlugin(Star):
             skill_name = training.training_state
             remain = max(0, training.remainSecs)
             train_lines = [
-                f"  训练室:  训练: {trainee_name} {skill_name}",
+                f"  训练: {trainee_name} {skill_name}",
                 f"     剩余 {self._fmt_time(remain)}",
             ]
         else:
-            train_lines = [f"  训练室:  训练: 空闲中"]
+            train_lines = [f"  训练: 空闲中"]
 
         lines = [
             f"═ {s.name}",
