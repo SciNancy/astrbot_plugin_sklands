@@ -19,6 +19,7 @@ from .db import (
     get_session,
     SkUser,
     Character,
+    GachaRecord,
     StaminaAlert,
     get_user_by_platform,
     get_default_ark_character,
@@ -27,9 +28,31 @@ from .db import (
     get_ef_characters,
     get_all_users_with_umos,
     get_or_create_stamina_alert,
+    get_gacha_records,
+    delete_gacha_records,
 )
 from .api import SklandAPI, SklandLoginAPI
-from .schemas import CRED, Topics, RogueData, Clue
+from .data_source import gacha_table_data
+from .schemas import (
+    CRED,
+    Topics,
+    RogueData,
+    Clue,
+    GachaInfo,
+    GachaCate,
+    EfGachaInfo,
+    GachaPool,
+    GachaPull,
+    GachaGroup,
+    EfGachaPoolInfo,
+    EfGachaGroup,
+    EfGachaPull,
+    GroupedGachaRecord,
+    EfGroupedGachaRecord,
+    EndfieldPoolType,
+    EndfieldCharPoolType,
+    EndfieldWeaponPoolType,
+)
 from .render_adapter import (
     render_ark_card,
     render_ef_card,
@@ -41,6 +64,244 @@ from .render_adapter import (
 )
 from .utils import call_api_with_refresh
 from .skland_cos import fetch_cos_images, _download_image
+
+
+# ==================== 抽卡记录辅助函数 ====================
+
+
+def _get_up_chars(pool_id: str) -> tuple[list[str], list[str]]:
+    """获取卡池 UP 五星和六星角色列表"""
+    up_five_chars, up_six_chars = [], []
+    for gacha_detail in gacha_table_data.gacha_details:
+        if gacha_detail.gachaPoolId != pool_id:
+            continue
+        up_char = gacha_detail.gachaPoolDetail.detailInfo.upCharInfo
+        avail_char = gacha_detail.gachaPoolDetail.detailInfo.availCharInfo
+        if up_char and hasattr(up_char, "perCharList") and up_char.perCharList:
+            for up_char_item in up_char.perCharList:
+                if up_char_item.rarityRank == 4:
+                    up_five_chars = up_char_item.charIdList
+                elif up_char_item.rarityRank == 5:
+                    up_six_chars = up_char_item.charIdList
+        elif avail_char and hasattr(avail_char, "perAvailList") and avail_char.perAvailList:
+            for avail_char_item in avail_char.perAvailList:
+                if avail_char_item.rarityRank == 4:
+                    up_five_chars = avail_char_item.charIdList
+                elif avail_char_item.rarityRank == 5:
+                    up_six_chars = avail_char_item.charIdList
+    return up_five_chars, up_six_chars
+
+
+def _get_pool_info(pool_id: str) -> tuple[int, int, int]:
+    """获取卡池开放时间、结束时间和规则类型"""
+    for gacha_table in gacha_table_data.gacha_table:
+        if gacha_table.gachaPoolId == pool_id:
+            return gacha_table.openTime, gacha_table.endTime, gacha_table.gachaRuleType
+    return 0, 0, 0
+
+
+def _infer_pool_category(pool_id: str) -> str:
+    """根据 pool_id 推导终末地卡池类别"""
+    pid = pool_id.lower()
+    if pid.startswith("special"):
+        return "special"
+    if pid.startswith("wepon") or pid.startswith("weapon"):
+        return "weapon"
+    if pid == "beginner":
+        return "beginner"
+    return "standard"
+
+
+def group_gacha_records(records: list[GachaRecord]) -> GroupedGachaRecord:
+    """将明日方舟抽卡记录按卡池分组"""
+    from collections import defaultdict
+
+    temp_grouped_records = defaultdict(lambda: defaultdict(list))
+    for record in records:
+        temp_grouped_records[record.pool_id][record.gacha_ts].append(record)
+
+    final_pools_data: list[GachaPool] = []
+    for pool_id, ts_dict in temp_grouped_records.items():
+        up_five_chars, up_six_chars = _get_up_chars(pool_id)
+        open_time, end_time, gacha_rule_type = _get_pool_info(pool_id)
+        gacha_groups: list[GachaGroup] = [
+            GachaGroup(
+                gacha_ts=gacha_ts,
+                pulls=[
+                    GachaPull(
+                        pool_name=p.pool_name,
+                        char_id=p.char_id,
+                        char_name=p.char_name,
+                        rarity=p.rarity,
+                        is_new=p.is_new,
+                        pos=p.pos,
+                    )
+                    for p in pulls
+                ],
+            )
+            for gacha_ts, pulls in ts_dict.items()
+        ]
+        # 取第一个非空记录作为卡池名称
+        first_pull = next(
+            (pull for group in gacha_groups for pull in group.pulls),
+            None,
+        )
+        pool_name = first_pull.pool_name if first_pull else "未知寻访"
+        gacha_pool = GachaPool(
+            gachaPoolId=pool_id,
+            gachaPoolName=pool_name,
+            openTime=open_time,
+            endTime=end_time,
+            up_five_chars=up_five_chars,
+            up_six_chars=up_six_chars,
+            gachaRuleType=gacha_rule_type,
+            records=gacha_groups,
+        )
+        final_pools_data.append(gacha_pool)
+
+    return GroupedGachaRecord(pools=final_pools_data)
+
+
+def group_ef_gacha_records(records: list[GachaRecord]) -> EfGroupedGachaRecord:
+    """将终末地抽卡记录按卡池分组"""
+    from collections import defaultdict
+
+    temp_grouped_records = defaultdict(lambda: defaultdict(list))
+    for record in records:
+        temp_grouped_records[record.pool_id][record.gacha_ts].append(record)
+
+    beginner_pools: list[EfGachaPoolInfo] = []
+    standard_pools: list[EfGachaPoolInfo] = []
+    special_pools: list[EfGachaPoolInfo] = []
+    weapon_pools: list[EfGachaPoolInfo] = []
+
+    for pool_id, ts_dict in temp_grouped_records.items():
+        gacha_groups: list[EfGachaGroup] = [
+            EfGachaGroup(
+                gacha_ts=gacha_ts,
+                pulls=[
+                    EfGachaPull(
+                        pool_name=p.pool_name,
+                        item_id=p.char_id,
+                        item_name=p.char_name,
+                        item_type=p.item_type,
+                        rarity=p.rarity,
+                        is_new=p.is_new,
+                        is_free=p.is_free,
+                        seq_id=p.pos,
+                    )
+                    for p in pulls
+                ],
+            )
+            for gacha_ts, pulls in ts_dict.items()
+        ]
+        first_record = next(iter(next(iter(ts_dict.values()))))
+        pool_type = first_record.item_type if first_record.item_type else "char"
+        # 取第一个非空记录作为卡池名称
+        first_pull = next(
+            (pull for group in gacha_groups for pull in group.pulls),
+            None,
+        )
+        pool_name = first_pull.pool_name if first_pull else "未知卡池"
+        pool_info = EfGachaPoolInfo(
+            pool_id=pool_id,
+            pool_name=pool_name,
+            pool_type=pool_type,
+            records=gacha_groups,
+        )
+        category = _infer_pool_category(pool_id)
+        if category == "beginner":
+            beginner_pools.append(pool_info)
+        elif category == "special":
+            special_pools.append(pool_info)
+        elif category == "weapon":
+            weapon_pools.append(pool_info)
+        else:
+            standard_pools.append(pool_info)
+
+    return EfGroupedGachaRecord(
+        beginner_pools=beginner_pools,
+        standard_pools=standard_pools,
+        special_pools=special_pools,
+        weapon_pools=weapon_pools,
+    )
+
+
+async def get_all_gacha_records(char: Character, cate: GachaCate, access_token: str, role_token: str, ak_cookie: str):
+    """异步生成器：获取指定分类下的所有明日方舟抽卡记录"""
+    import httpx
+
+    async with httpx.AsyncClient() as client:
+        page = await SklandAPI.get_gacha_history(char.uid, role_token, access_token, ak_cookie, cate.id)
+        prev_ts, prev_pos = None, None
+
+        while page and page.gacha_list:
+            for record in page.gacha_list:
+                yield record
+            if not page.hasMore:
+                break
+            if (page.next_ts, page.next_pos) == (prev_ts, prev_pos):
+                break
+            prev_ts, prev_pos = page.next_ts, page.next_pos
+            page = await SklandAPI.get_gacha_history(
+                char.uid,
+                role_token,
+                access_token,
+                ak_cookie,
+                cate.id,
+                gachaTs=page.next_ts,
+                pos=page.next_pos,
+                client=client,
+            )
+
+
+async def get_all_ef_gacha_records(
+    char: Character,
+    pool_type: EndfieldPoolType,
+    role_token: str,
+    concurrency: int = 8,
+):
+    """获取指定卡池类型下的所有终末地抽卡记录
+
+    自动处理分页，并发请求数据直到获取全部记录。
+    """
+    import itertools
+
+    if concurrency <= 0:
+        raise ValueError("concurrency must be greater than 0")
+
+    server_id = char.channel_master_id
+    first_page = await SklandAPI.get_ef_gacha_history(pool_type, server_id, role_token)
+    if not first_page.gacha_list:
+        return []
+    if not first_page.hasMore:
+        return first_page.gacha_list
+
+    page_size = len(first_page.gacha_list)  # normally 5
+    last_seq = first_page.gacha_list[-1].seq_id_int
+    last_seq_lock = asyncio.Lock()
+
+    async def fetch_page(client: httpx.AsyncClient) -> list[EfGachaInfo]:
+        nonlocal last_seq
+        records: list[EfGachaInfo] = []
+        while True:
+            async with last_seq_lock:
+                seq_id, last_seq = last_seq, last_seq - page_size
+            if seq_id <= 0:
+                break
+            seq_end = seq_id - page_size
+            page = await SklandAPI.get_ef_gacha_history(pool_type, server_id, role_token, str(seq_id), client)
+            gacha_infos = [i for i in page.gacha_list if seq_end <= i.seq_id_int < seq_id]
+            records.extend(gacha_infos)
+            if not page.hasMore:
+                break
+        return records
+
+    import httpx
+    async with httpx.AsyncClient() as client:
+        results = await asyncio.gather(*(fetch_page(client) for _ in range(concurrency)))
+
+    return sorted(itertools.chain(first_page.gacha_list, *results), key=lambda x: x.seq_id_int, reverse=True)
 
 
 class SklandPlugin(Star):
@@ -60,6 +321,15 @@ class SklandPlugin(Star):
     async def on_loaded(self):
         await init_db(str(self.db_path))
         logger.info("[Skland] 插件已加载，数据库就绪")
+        # 加载卡池数据（用于抽卡分析）
+        try:
+            downloaded = await gacha_table_data.load()
+            if downloaded:
+                logger.info("[Skland] 卡池数据已下载/更新")
+            else:
+                logger.info("[Skland] 卡池数据已是最新")
+        except Exception as e:
+            logger.warning(f"[Skland] 卡池数据加载失败: {e}")
         # 启动体力预警后台轮询
         self._start_stamina_alert_loop()
 
@@ -1016,21 +1286,270 @@ class SklandPlugin(Star):
                 yield event.plain_result(self._sk(f"肉鸽详情渲染失败: {e}"))
             event.stop_event()
 
-    # ==================== 抽卡记录（占位） ====================
+    # ==================== 抽卡记录 ====================
 
     @sk.command("gacha")
     async def cmd_gacha(self, event: AstrMessageEvent):
         """明日方舟抽卡记录  用法: /sk gacha"""
-        yield event.plain_result(
-            self._sk("抽卡记录功能正在移植中，暂不可用。\n请使用 /sk rogue 查看肉鸽战绩。")
-        )
+        sender_id = event.get_sender_id()
+        gacha_render_max = 30  # 每页最多渲染卡池数
+
+        async with await get_session() as session:
+            user = await get_user_by_platform(session, sender_id)
+            if not user:
+                yield event.plain_result(self._sk("未绑定森空岛账号."))
+                event.stop_event()
+                return
+            char = await get_default_ark_character(session, user)
+            if not char:
+                yield event.plain_result(self._sk("未找到绑定的[Arknights]角色."))
+                event.stop_event()
+                return
+
+            yield event.plain_result(self._sk("正在获取抽卡记录，请稍候..."))
+
+            # 获取官网登录凭证链
+            try:
+                grant_code = await SklandLoginAPI.get_grant_code(user.access_token, 1)
+                role_token = await SklandLoginAPI.get_role_token_by_uid(char.uid, grant_code)
+                ak_cookie = await SklandLoginAPI.get_ak_cookie(role_token)
+            except Exception as e:
+                logger.exception(f"[Skland] 获取抽卡凭证失败: {e}")
+                yield event.plain_result(self._sk(f"获取抽卡凭证失败: {e}"))
+                event.stop_event()
+                return
+
+            # 获取卡池类别并拉取记录
+            try:
+                categories = await SklandAPI.get_gacha_categories(char.uid, role_token, user.access_token, ak_cookie)
+            except Exception as e:
+                yield event.plain_result(self._sk(self._format_error(e)))
+                event.stop_event()
+                return
+
+            all_gacha_records_flat: list[GachaInfo] = []
+            for cate in categories:
+                count_before = len(all_gacha_records_flat)
+                try:
+                    async for record in get_all_gacha_records(char, cate, user.access_token, role_token, ak_cookie):
+                        all_gacha_records_flat.append(record)
+                except Exception as e:
+                    logger.warning(f"[Skland] 获取类别 {cate.name} 抽卡记录失败: {e}")
+                    continue
+                count_after = len(all_gacha_records_flat)
+                logger.debug(
+                    f"[Skland] 角色 {char.nickname} 类别 {cate.name} 新增 {count_after - count_before} 条记录"
+                )
+
+            # 读取已有记录并去重
+            existing_records = await get_gacha_records(session, user.id, char.uid)
+            existing_set = {(r.gacha_ts, r.pos) for r in existing_records}
+
+            record_to_save: list[GachaRecord] = []
+            for gacha_record in all_gacha_records_flat:
+                record = GachaRecord(
+                    uid=user.id,
+                    char_pk_id=char.id,
+                    char_uid=char.uid,
+                    pool_id=gacha_record.poolId,
+                    pool_name=gacha_record.poolName,
+                    char_id=gacha_record.charId,
+                    char_name=gacha_record.charName,
+                    rarity=gacha_record.rarity,
+                    is_new=gacha_record.isNew,
+                    gacha_ts=gacha_record.gacha_ts_sec,
+                    pos=gacha_record.pos,
+                )
+                if (int(gacha_record.gacha_ts_sec), gacha_record.pos) not in existing_set:
+                    record_to_save.append(record)
+
+            # 先保存新记录到数据库（避免后续 call_api_with_refresh 中的 commit 导致新记录遗漏）
+            if record_to_save:
+                session.add_all(record_to_save)
+                await session.commit()
+                logger.info(f"[Skland] 保存 {len(record_to_save)} 条新抽卡记录")
+
+            all_records = existing_records + record_to_save
+
+        # 获取角色信息用于渲染（新开 session，避免与上面的 session 状态纠缠）
+        async with await get_session() as session:
+            user = await get_user_by_platform(session, sender_id)
+            char = await get_default_ark_character(session, user)
+            cred = CRED(cred=user.cred, token=user.cred_token)
+            try:
+                user_info = await call_api_with_refresh(user, SklandAPI.ark_card, cred, str(char.uid))
+                await session.commit()
+            except Exception as e:
+                yield event.plain_result(self._sk(self._format_error(e)))
+                event.stop_event()
+                return
+
+        # 重新读取所有记录并渲染（再次新开 session）
+        async with await get_session() as session:
+            all_records = await get_gacha_records(session, user.id, char.uid)
+            gacha_data_grouped = group_gacha_records(all_records)
+
+            if not gacha_data_grouped.pools:
+                yield event.plain_result(self._sk("未找到抽卡记录。"))
+                event.stop_event()
+                return
+
+            pools_slice = gacha_data_grouped.pools
+            if len(pools_slice) > gacha_render_max:
+                yield event.plain_result(self._sk("抽卡记录过多，将分多张图片发送..."))
+                for i in range(0, len(pools_slice), gacha_render_max):
+                    try:
+                        image_path = await render_gacha_history(
+                            self,
+                            gacha_data_grouped,
+                            char,
+                            user_info.status,
+                            i,
+                            i + gacha_render_max,
+                        )
+                        yield event.image_result(image_path)
+                    except Exception as e:
+                        logger.exception(f"[Skland] 渲染抽卡记录第 {i // gacha_render_max + 1} 页失败: {e}")
+                        yield event.plain_result(self._sk(f"渲染第 {i // gacha_render_max + 1} 页失败: {e}"))
+            else:
+                try:
+                    image_path = await render_gacha_history(self, gacha_data_grouped, char, user_info.status)
+                    yield event.image_result(image_path)
+                except Exception as e:
+                    logger.exception(f"[Skland] 渲染抽卡记录失败: {e}")
+                    yield event.plain_result(self._sk(f"抽卡记录渲染失败: {e}"))
+
+            event.stop_event()
 
     @sk.command("efgacha")
     async def cmd_efgacha(self, event: AstrMessageEvent):
         """终末地抽卡记录  用法: /sk efgacha"""
-        yield event.plain_result(
-            self._sk("终末地抽卡记录功能正在移植中，暂不可用。\n请使用 /sk efcard 查看终末地卡片。")
-        )
+        sender_id = event.get_sender_id()
+        ef_gacha_render_max = 5  # 每页最多渲染卡池数
+
+        async with await get_session() as session:
+            user = await get_user_by_platform(session, sender_id)
+            if not user:
+                yield event.plain_result(self._sk("未绑定森空岛账号."))
+                event.stop_event()
+                return
+            char = await get_default_ef_character(session, user)
+            if not char:
+                yield event.plain_result(self._sk("未找到绑定的[EndField]角色."))
+                event.stop_event()
+                return
+
+            yield event.plain_result(self._sk("正在获取终末地抽卡记录，请稍候..."))
+
+            # 获取官网登录凭证
+            try:
+                grant_code = await SklandLoginAPI.get_grant_code(user.access_token, 1)
+                role_token = await SklandLoginAPI.get_role_token_by_uid(char.uid, grant_code)
+            except Exception as e:
+                logger.exception(f"[Skland] 获取抽卡凭证失败: {e}")
+                yield event.plain_result(self._sk(f"获取抽卡凭证失败: {e}"))
+                event.stop_event()
+                return
+
+            # 获取所有卡池类型的记录
+            all_ef_records: list[GachaRecord] = []
+            existing_records = await get_gacha_records(session, user.id, char.uid)
+            existing_set = {(r.gacha_ts, r.pos) for r in existing_records}
+
+            pool_types = [EndfieldPoolType.STANDARD, EndfieldPoolType.SPECIAL, EndfieldPoolType.BEGINNER, EndfieldPoolType.WEAPON]
+            for pool_type in pool_types:
+                try:
+                    records = await get_all_ef_gacha_records(char, pool_type, role_token, concurrency=8)
+                    for info in records:
+                        record = GachaRecord(
+                            uid=user.id,
+                            char_pk_id=char.id,
+                            char_uid=char.uid,
+                            app_code="endfield",
+                            item_type="weapon" if pool_type == EndfieldPoolType.WEAPON else "char",
+                            pool_id=info.poolId,
+                            pool_name=info.poolName,
+                            char_id=info.item_id,
+                            char_name=info.item_name,
+                            rarity=info.rarity,
+                            is_new=info.isNew,
+                            is_free=getattr(info, "isFree", False),
+                            gacha_ts=info.gacha_ts_sec,
+                            pos=info.seq_id_int,
+                        )
+                        all_ef_records.append(record)
+                        if (record.gacha_ts, record.pos) not in existing_set:
+                            existing_set.add((record.gacha_ts, record.pos))
+                            session.add(record)
+                except Exception as e:
+                    logger.warning(f"[Skland] 获取终末地 {pool_type.value} 池记录失败: {e}")
+                    continue
+
+            # 先提交新记录（渲染失败也不影响已保存的数据）
+            await session.commit()
+
+        # 重新读取所有记录并渲染（新开 session）
+        async with await get_session() as session:
+            user = await get_user_by_platform(session, sender_id)
+            char = await get_default_ef_character(session, user)
+            all_records = await get_gacha_records(session, user.id, char.uid)
+
+            # 获取角色信息用于渲染
+            try:
+                skland_uid = user.user_id or sender_id
+                cred = CRED(cred=user.cred, token=user.cred_token)
+                player_info = await call_api_with_refresh(
+                    user, SklandAPI.endfield_card, cred, skland_uid, char
+                )
+                await session.commit()
+            except Exception as e:
+                yield event.plain_result(self._sk(self._format_error(e)))
+                event.stop_event()
+                return
+
+            # 构建 PlayerBase 用于渲染
+            from .schemas import PlayerBase
+            player = PlayerBase(
+                name=player_info.base.name,
+                avatarUrl=player_info.base.avatarUrl,
+                level=player_info.base.level,
+                uid=player_info.base.uid,
+            )
+
+            # 分组并渲染
+            gacha_data_grouped = group_ef_gacha_records(all_records)
+
+            if not gacha_data_grouped.all_pools:
+                yield event.plain_result(self._sk("未找到终末地抽卡记录。"))
+                event.stop_event()
+                return
+
+            pools_slice = gacha_data_grouped.all_pools
+            if len(pools_slice) > ef_gacha_render_max:
+                yield event.plain_result(self._sk("抽卡记录过多，将分多张图片发送..."))
+                for i in range(0, len(pools_slice), ef_gacha_render_max):
+                    try:
+                        image_path = await render_ef_gacha_history(
+                            self,
+                            gacha_data_grouped,
+                            player,
+                            char,
+                            i,
+                            i + ef_gacha_render_max,
+                        )
+                        yield event.image_result(image_path)
+                    except Exception as e:
+                        logger.exception(f"[Skland] 渲染终末地抽卡第 {i // ef_gacha_render_max + 1} 页失败: {e}")
+                        yield event.plain_result(self._sk(f"渲染第 {i // ef_gacha_render_max + 1} 页失败: {e}"))
+            else:
+                try:
+                    image_path = await render_ef_gacha_history(self, gacha_data_grouped, player, char)
+                    yield event.image_result(image_path)
+                except Exception as e:
+                    logger.exception(f"[Skland] 渲染终末地抽卡记录失败: {e}")
+                    yield event.plain_result(self._sk(f"终末地抽卡记录渲染失败: {e}"))
+
+            event.stop_event()
 
     # ==================== 体力预警 ====================
 

@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sess
 
 logger = logging.getLogger(__name__)
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column
-from sqlalchemy import String, Text, Boolean, select, text
+from sqlalchemy import String, Text, Boolean, BigInteger, select, text
 
 Base = declarative_base()
 
@@ -42,6 +42,29 @@ class Character(Base):
     channel_master_id: Mapped[str] = mapped_column(Text)
     nickname: Mapped[str] = mapped_column(Text)
     isdefault: Mapped[bool] = mapped_column(default=False)
+
+
+class GachaRecord(Base):
+    """抽卡记录表"""
+    __tablename__ = "skland_gacha_record"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    uid: Mapped[int] = mapped_column()  # 关联 SkUser.id
+    char_pk_id: Mapped[int] = mapped_column()  # 关联 Character.id
+    char_uid: Mapped[str] = mapped_column(Text)
+    app_code: Mapped[str] = mapped_column(Text, default="arknights")
+    """Game App Code: arknights / endfield"""
+    item_type: Mapped[str] = mapped_column(Text, default="char")
+    """Item Type: char / weapon"""
+    pool_id: Mapped[str] = mapped_column(Text)
+    pool_name: Mapped[str] = mapped_column(Text)
+    char_id: Mapped[str] = mapped_column(Text)
+    char_name: Mapped[str] = mapped_column(Text)
+    rarity: Mapped[int] = mapped_column()
+    is_new: Mapped[bool] = mapped_column()
+    is_free: Mapped[bool] = mapped_column(default=False)
+    gacha_ts: Mapped[int] = mapped_column(BigInteger)
+    pos: Mapped[int] = mapped_column()
 
 
 class StaminaAlert(Base):
@@ -197,6 +220,28 @@ async def get_stamina_alert(session: AsyncSession, user_id: int, char_uid: str, 
         )
     )
     return result.scalar_one_or_none()
+
+
+async def get_gacha_records(session: AsyncSession, user_id: int, char_uid: str) -> list[GachaRecord]:
+    """获取指定用户和角色的所有抽卡记录"""
+    result = await session.execute(
+        select(GachaRecord).where(
+            GachaRecord.uid == user_id,
+            GachaRecord.char_uid == char_uid,
+        )
+    )
+    return list(result.scalars().all())
+
+
+async def delete_gacha_records(session: AsyncSession, char_pk_id: int, char_uid: str):
+    """删除指定角色的抽卡记录"""
+    from sqlalchemy import delete
+    await session.execute(
+        delete(GachaRecord).where(
+            GachaRecord.char_pk_id == char_pk_id,
+            GachaRecord.char_uid == char_uid,
+        )
+    )
 
 
 async def get_or_create_stamina_alert(session: AsyncSession, user_id: int, char_uid: str, game: str) -> StaminaAlert:
