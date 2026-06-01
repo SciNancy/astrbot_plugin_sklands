@@ -259,7 +259,7 @@ class GameResourceDownloader:
             if failed_count > 0:
                 success_msg += f"，失败 {failed_count} 个"
             success_msg += f"，耗时 {time_consumed}"
-            logger.success(success_msg)
+            logger.info(success_msg)
 
         return DownloadResult(
             version=None,
