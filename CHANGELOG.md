@@ -1,5 +1,26 @@
 # Changelog
 
+## 2026-06-05
+
+### 更新 13：新增公招推荐功能 + 精简插件体积
+
+- **新增 `/sk recruit`（`/sk 公招`）命令**：
+  - **文字输入**：`/sk recruit 近卫 输出 群攻` 直接计算标签组合
+  - **图片识别**：`/sk recruit` + [附带公招截图] 调用 LLM 视觉识别标签后计算
+  - 核心算法：枚举 1~3 标签所有组合 → 取干员交集 → 排除无高级资深的 6 星 → 按保底星级排序
+  - 输出格式：最高保底星级 + 各组合推荐（含必出 5/6 星提示、可获得干员列表）
+  - 支持模糊匹配：OCR 误识别"近卫干员"自动去后缀、编辑距离 ≤1 容错
+- **新增公招数据模块**：
+  - `recruit_data.py`：从 Aceship AN-EN-Tags 加载干员/标签/职业数据，带线程锁缓存
+  - `recruit_calc.py`：组合计算核心，含标签标准化、交集计算、4星+筛选、格式化输出
+  - `recruit_vision.py`：LLM 视觉识别，利用 AstrBot `llm_generate` 接口识图
+  - 预置 `data/recruit/` 下三份 JSON 数据源（共 ~187KB）
+- **精简插件体积**：
+  - 删除 `nonebot-plugin-skland-master/` 死重目录（原 35MB 完整仓库拷贝，已完成移植不再需要）
+  - 插件体积从 60MB 降至 26MB
+
+**修改文件**：`main.py`、`recruit_data.py`、`recruit_calc.py`、`recruit_vision.py`
+
 ## 2026-06-01
 
 ### 更新 12：移植抽卡分析渲染（明日方舟 + 终末地）

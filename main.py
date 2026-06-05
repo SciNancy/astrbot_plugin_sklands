@@ -65,6 +65,11 @@ from .render_adapter import (
 from .utils import call_api_with_refresh
 from .skland_cos import fetch_cos_images, _download_image
 
+# 公招模块
+from .recruit_data import RECRUIT_TAG_COUNT
+from .recruit_calc import normalize_tags, calculate_combinations, format_recommendation
+from .recruit_vision import recognize_tags_from_image
+
 
 # ==================== 抽卡记录辅助函数 ====================
 
@@ -1550,6 +1555,95 @@ class SklandPlugin(Star):
                     yield event.plain_result(self._sk(f"终末地抽卡记录渲染失败: {e}"))
 
             event.stop_event()
+
+    # ==================== 公招推荐 ====================
+
+    @sk.command("recruit")
+    async def cmd_recruit(self, event: AstrMessageEvent):
+        """明日方舟公开招募标签推荐  用法: /sk recruit [标签1 标签2 ...] 或直接发送截图"""
+        raw_tags: list[str] = []
+        image_url: str | None = None
+
+        # 1. 尝试从消息链中提取图片
+        for comp in event.get_messages():
+            if isinstance(comp, Comp.Image):
+                # 优先使用 url，否则用 file（可能包含 file:// 或 http 链接）
+                image_url = comp.url or comp.file
+                if image_url:
+                    break
+
+        # 2. 尝试从文字参数中提取标签
+        msg_str = event.get_message_str()
+        # 去掉命令前缀 "/sk recruit" 或 "/sk 公招"
+        parts = msg_str.split()
+        # 找到 "recruit" 或 "公招" 后的所有参数
+        cmd_idx = -1
+        for i, p in enumerate(parts):
+            if p in ("recruit", "公招", "/sk"):
+                if p == "/sk" and i + 1 < len(parts) and parts[i + 1] in ("recruit", "公招"):
+                    cmd_idx = i + 1
+                    break
+                elif p in ("recruit", "公招"):
+                    cmd_idx = i
+                    break
+        if cmd_idx >= 0:
+            raw_tags = parts[cmd_idx + 1:]
+
+        # 3. 分支处理：图片识别 vs 文字输入
+        if image_url and not raw_tags:
+            # LLM 视觉识别
+            try:
+                yield event.plain_result(self._sk("🔍 正在识别公招截图中的标签..."))
+                vision_result = await recognize_tags_from_image(self.context, image_url)
+                raw_tags = vision_result.tags
+                logger.info(f"[Skland] LLM 识别公招标签: {raw_tags}")
+            except Exception as e:
+                logger.exception(f"[Skland] 公招图片识别失败: {e}")
+                yield event.plain_result(self._sk(f"❌ 图片识别失败: {e}\n请尝试直接输入标签，如：/sk recruit 近卫 输出 群攻"))
+                event.stop_event()
+                return
+
+        # 4. 校验输入
+        if not raw_tags:
+            usage = (
+                "【公招推荐】\n"
+                "用法1（文字）: /sk recruit 近卫 输出 群攻\n"
+                "用法2（截图）: /sk recruit + [附带公招截图]\n"
+                "\n支持标签：\n"
+                "资质: 新手 | 资深干员 | 高级资深干员\n"
+                "位置: 远程位 | 近战位\n"
+                "职业: 先锋 | 近卫 | 狙击 | 重装 | 医疗 | 辅助 | 术师 | 特种\n"
+                "词缀: 治疗 | 输出 | 支援 | 群攻 | 减速 | 生存 | 防护\n"
+                "      削弱 | 位移 | 控场 | 爆发 | 召唤 | 快速复活 | 费用回复 | 支援机械"
+            )
+            yield event.plain_result(self._sk(usage))
+            event.stop_event()
+            return
+
+        if len(raw_tags) != RECRUIT_TAG_COUNT:
+            yield event.plain_result(
+                self._sk(f"⚠️ 公招界面固定显示 {RECRUIT_TAG_COUNT} 个标签，你提供了 {len(raw_tags)} 个。继续计算，但结果可能不准确。")
+            )
+
+        # 5. 标准化标签
+        normalized = normalize_tags(raw_tags)
+        if not normalized:
+            yield event.plain_result(
+                self._sk(f"❌ 无法识别任何有效标签，输入: {' | '.join(raw_tags)}\n请检查拼写或尝试截图识别。")
+            )
+            event.stop_event()
+            return
+
+        # 6. 计算推荐
+        try:
+            combos = calculate_combinations(normalized)
+            report = format_recommendation(combos, raw_tags)
+            yield event.plain_result(self._sk(report))
+        except Exception as e:
+            logger.exception(f"[Skland] 公招计算失败: {e}")
+            yield event.plain_result(self._sk(f"❌ 公招计算出错: {e}"))
+
+        event.stop_event()
 
     # ==================== 体力预警 ====================
 
