@@ -11,7 +11,6 @@
 
 import json
 import logging
-import threading
 from pathlib import Path
 from typing import TypedDict
 
@@ -20,8 +19,8 @@ logger = logging.getLogger("astrbot")
 # 数据文件所在目录（插件 data/recruit 子目录）
 DATA_DIR = Path(__file__).parent / "data" / "recruit"
 
-# 全局锁，保护缓存加载的竞态条件
-_load_lock = threading.Lock()
+# 不使用线程锁：Python GIL 保证 dict 赋值是原子操作，且数据加载幂等
+# 即使并发调用，最多重复加载一次（187KB 数据量可忽略）
 
 
 class OperatorData(TypedDict):
@@ -112,27 +111,23 @@ def load_operators() -> list[RecruitOperator]:
     if _operators is not None:
         return _operators
 
-    with _load_lock:
-        if _operators is not None:
-            return _operators
+    raw_data = _load_json("tl-akhr.json")
+    result: list[RecruitOperator] = []
 
-        raw_data = _load_json("tl-akhr.json")
-        result: list[RecruitOperator] = []
+    for item in raw_data:
+        # 排除国服不可公招的干员
+        if item.get("hidden", False):
+            continue
+        # 只保留有公招标签的干员
+        if not item.get("tags"):
+            continue
+        result.append(RecruitOperator(item))
 
-        for item in raw_data:
-            # 排除国服不可公招的干员
-            if item.get("hidden", False):
-                continue
-            # 只保留有公招标签的干员
-            if not item.get("tags"):
-                continue
-            result.append(RecruitOperator(item))
-
-        # 按星级降序排列（高星级优先）
-        result.sort(key=lambda op: op.rarity, reverse=True)
-        _operators = result
-        logger.info(f"[Recruit] 加载了 {len(result)} 名可公招干员")
-        return result
+    # 按星级降序排列（高星级优先）
+    result.sort(key=lambda op: op.rarity, reverse=True)
+    _operators = result
+    logger.info(f"[Recruit] 加载了 {len(result)} 名可公招干员")
+    return result
 
 
 def load_all_tags() -> list[str]:
@@ -144,22 +139,18 @@ def load_all_tags() -> list[str]:
     if _all_tags is not None:
         return _all_tags
 
-    with _load_lock:
-        if _all_tags is not None:
-            return _all_tags
+    raw_data = _load_json("tl-tags.json")
+    result: list[str] = []
 
-        raw_data = _load_json("tl-tags.json")
-        result: list[str] = []
+    for item in raw_data:
+        tag_cn = item.get("tag_cn", "")
+        # 跳过空标签和特殊标记
+        if not tag_cn or tag_cn in ("三测暂不实装", "MELEE", "RANGED"):
+            continue
+        result.append(tag_cn)
 
-        for item in raw_data:
-            tag_cn = item.get("tag_cn", "")
-            # 跳过空标签和特殊标记
-            if not tag_cn or tag_cn in ("三测暂不实装", "MELEE", "RANGED"):
-                continue
-            result.append(tag_cn)
-
-        _all_tags = result
-        return result
+    _all_tags = result
+    return result
 
 
 def load_profession_tags() -> list[str]:
@@ -168,15 +159,11 @@ def load_profession_tags() -> list[str]:
     if _profession_tags is not None:
         return _profession_tags
 
-    with _load_lock:
-        if _profession_tags is not None:
-            return _profession_tags
+    raw_data = _load_json("tl-type.json")
+    result = [item["type_cn"] for item in raw_data if item.get("type_cn")]
 
-        raw_data = _load_json("tl-type.json")
-        result = [item["type_cn"] for item in raw_data if item.get("type_cn")]
-
-        _profession_tags = result
-        return result
+    _profession_tags = result
+    return result
 
 
 def get_tag_type(tag: str) -> str:
@@ -192,22 +179,18 @@ def get_tag_type(tag: str) -> str:
     if _tag_type_map is not None:
         return _tag_type_map.get(tag, "unknown")
 
-    with _load_lock:
-        if _tag_type_map is not None:
-            return _tag_type_map.get(tag, "unknown")
+    _tag_type_map = {}
+    # 职业标签
+    for prof in load_profession_tags():
+        _tag_type_map[prof] = "profession"
+    # 其他标签
+    raw_data = _load_json("tl-tags.json")
+    for item in raw_data:
+        tag_cn = item.get("tag_cn", "")
+        if tag_cn:
+            _tag_type_map[tag_cn] = item.get("type", "affix")
 
-        _tag_type_map = {}
-        # 职业标签
-        for prof in load_profession_tags():
-            _tag_type_map[prof] = "profession"
-        # 其他标签
-        raw_data = _load_json("tl-tags.json")
-        for item in raw_data:
-            tag_cn = item.get("tag_cn", "")
-            if tag_cn:
-                _tag_type_map[tag_cn] = item.get("type", "affix")
-
-        return _tag_type_map.get(tag, "unknown")
+    return _tag_type_map.get(tag, "unknown")
 
 
 def build_operator_by_tag() -> dict[str, list[RecruitOperator]]:
@@ -221,38 +204,34 @@ def build_operator_by_tag() -> dict[str, list[RecruitOperator]]:
     if _operator_by_tag is not None:
         return _operator_by_tag
 
-    with _load_lock:
-        if _operator_by_tag is not None:
-            return _operator_by_tag
+    operators = load_operators()
+    result: dict[str, list[RecruitOperator]] = {}
 
-        operators = load_operators()
-        result: dict[str, list[RecruitOperator]] = {}
+    all_tags = load_all_tags()
+    professions = load_profession_tags()
 
-        all_tags = load_all_tags()
-        professions = load_profession_tags()
+    # 初始化每个标签的列表（包含普通标签和职业标签）
+    for tag in all_tags:
+        result[tag] = []
+    for prof in professions:
+        result[prof] = []
 
-        # 初始化每个标签的列表（包含普通标签和职业标签）
-        for tag in all_tags:
-            result[tag] = []
-        for prof in professions:
-            result[prof] = []
+    for op in operators:
+        # 干员自带标签
+        for tag in op.tags:
+            if tag in result:
+                result[tag].append(op)
+        # 职业标签（从 profession 字段映射）
+        if op.profession in result:
+            result[op.profession].append(op)
 
-        for op in operators:
-            # 干员自带标签
-            for tag in op.tags:
-                if tag in result:
-                    result[tag].append(op)
-            # 职业标签（从 profession 字段映射）
-            if op.profession in result:
-                result[op.profession].append(op)
+    # 去重并按星级降序（利用 RecruitOperator 的 __hash__ 用 set 去重）
+    for tag in result:
+        unique = sorted(set(result[tag]), key=lambda op: op.rarity, reverse=True)
+        result[tag] = unique
 
-        # 去重并按星级降序（利用 RecruitOperator 的 __hash__ 用 set 去重）
-        for tag in result:
-            unique = sorted(set(result[tag]), key=lambda op: op.rarity, reverse=True)
-            result[tag] = unique
-
-        _operator_by_tag = result
-        return result
+    _operator_by_tag = result
+    return result
 
 
 # 常量定义
