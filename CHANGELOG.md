@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-06-08
+
+### 更新 14：修复公招功能死锁导致 AstrBot 卡死
+
+- **问题根因**：`recruit_data.py` 使用 `threading.Lock()`（不可重入锁），
+  `build_operator_by_tag()` 在持有锁时嵌套调用 `load_operators()` / `load_all_tags()` /
+  `load_profession_tags()`，三者均尝试获取同一把锁 → 同一线程死锁
+- **影响**：`/sk recruit` 命令触发后，AstrBot 事件循环永久阻塞，所有命令无响应
+- **修复**：移除 `threading.Lock()`，Python GIL 已保证 dict 赋值原子性，数据加载幂等且量小，无需锁保护
+- **验证**：本地完整流程测试（加载→标准化→计算→格式化）10 秒内完成
+
+**修改文件**：`recruit_data.py`
+
 ## 2026-06-05
 
 ### 更新 13：新增公招推荐功能 + 精简插件体积
