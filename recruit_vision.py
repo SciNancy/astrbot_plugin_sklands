@@ -53,7 +53,7 @@ async def recognize_tags_from_image(
 
     Args:
         context: AstrBot Context 对象
-        image_url: 图片 URL（支持 http/https/file 协议）
+        image_url: 图片路径或 URL（支持 http/https/file 协议及本地绝对路径）
         provider_id: 指定的 LLM Provider ID，None 则使用当前会话默认 Provider
 
     Returns:

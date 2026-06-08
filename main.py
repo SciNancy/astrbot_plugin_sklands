@@ -1565,12 +1565,19 @@ class SklandPlugin(Star):
         image_url: str | None = None
 
         # 1. 尝试从消息链中提取图片
+        # 使用 convert_to_file_path() 统一转换为本地路径，
+        # 自动处理 QQ 的 file_id、网络 URL、base64 等各种格式
         for comp in event.get_messages():
             if isinstance(comp, Comp.Image):
-                # 优先使用 url，否则用 file（可能包含 file:// 或 http 链接）
-                image_url = comp.url or comp.file
-                if image_url:
-                    break
+                try:
+                    image_url = await comp.convert_to_file_path()
+                    if image_url:
+                        break
+                except Exception:
+                    logger.warning("[Skland] convert_to_file_path 失败，尝试 fallback 到 url/file")
+                    image_url = comp.url or comp.file
+                    if image_url:
+                        break
 
         # 2. 尝试从文字参数中提取标签
         msg_str = event.get_message_str()
