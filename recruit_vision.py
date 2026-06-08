@@ -7,7 +7,7 @@
 import json
 import logging
 import re
-from typing import TypedDict
+from dataclasses import dataclass
 
 logger = logging.getLogger("astrbot")
 
@@ -37,7 +37,8 @@ _RECRUIT_VISION_PROMPT = f"""你是一个明日方舟公招标签识别助手。
 """
 
 
-class VisionResult(TypedDict):
+@dataclass
+class VisionResult:
     """视觉识别结果"""
 
     tags: list[str]
